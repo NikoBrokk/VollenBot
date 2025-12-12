@@ -1,0 +1,23 @@
+{
+  "name": "vollenbot",
+  "version": "1.0.0",
+  "description": "Crawl script for Vollen Opplevelser using Firecrawl API",
+  "main": "dist/scripts/crawl.js",
+  "scripts": {
+    "crawl": "tsx scripts/crawl.ts",
+    "build": "tsc"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@mendable/firecrawl-js": "^1.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
+  }
+}
+
