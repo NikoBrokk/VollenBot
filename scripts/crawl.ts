@@ -508,14 +508,33 @@ async function crawl(): Promise<void> {
       try {
         const scrapeResponse = await app.scrapeUrl(url, {
           formats: ['markdown'],
-          onlyMainContent: false, // Get ALL content
+          onlyMainContent: false, // Get ALL content including nav/footer/header
           excludeTags: [
             // Only exclude technical tags that don't contain links or content
             'script',
             'style',
             'noscript',
             // NOTE: We intentionally DO NOT exclude nav/footer/header/aside
-            // to get maximum content. Content will be cleaned later.
+            // to get maximum content. These often contain important info like
+            // opening hours, contact info, location details, etc.
+          ],
+          includeTags: [
+            // Explicitly include all content areas
+            'main',
+            'article',
+            'section',
+            'nav',
+            'footer',
+            'header',
+            'aside',
+            'div',
+            'p',
+            'ul',
+            'ol',
+            'li',
+            'dl',
+            'dt',
+            'dd',
           ],
         });
         

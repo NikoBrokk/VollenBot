@@ -410,8 +410,9 @@ body {
   gap: 8px;
 }
 
-/* Input */
-.vb-bot__form input {
+/* Input/Textarea */
+.vb-bot__form input,
+.vb-bot__form textarea {
   flex: 1;
   border: 1px solid var(--gray-200);
   border-radius: 20px;
@@ -420,21 +421,34 @@ body {
   background: white;
   transition: border-color 0.2s;
   font-family: inherit;
+  resize: none;
+  overflow-y: auto;
+  min-height: 42px;
+  max-height: 120px;
+  line-height: 1.5;
 }
 
-.vb-bot__form input:focus {
+.vb-bot__form textarea {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.vb-bot__form input:focus,
+.vb-bot__form textarea:focus {
   outline: none;
   border-color: var(--vollen-dark);
   box-shadow: 0 0 0 2px rgba(254, 211, 167, 0.3);
 }
 
-.vb-bot__form input.typing {
+.vb-bot__form input.typing,
+.vb-bot__form textarea.typing {
   background: linear-gradient(135deg, #FFF4E6 0%, #FED3A7 100%);
   color: var(--gray-800);
   font-style: italic;
 }
 
-.vb-bot__form input.typing::placeholder {
+.vb-bot__form input.typing::placeholder,
+.vb-bot__form textarea.typing::placeholder {
   animation: wave 1.5s ease-in-out infinite;
 }
 

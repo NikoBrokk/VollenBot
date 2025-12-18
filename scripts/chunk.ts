@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { cwd } from 'process';
+import * as process from 'process';
 
 interface Section {
   section_title: string;
@@ -28,8 +29,8 @@ const OUTPUT_DIR = path.join(cwd(), 'data', 'chunks');
 const OUTPUT_FILE = path.join(OUTPUT_DIR, 'vollen_chunks_clean.json');
 const REPORT_FILE = path.join(OUTPUT_DIR, 'cleaning_report.txt');
 
-// Chunking parameters
-const MIN_TOKENS = 300;
+// Chunking parameters - REDUCED to capture more content
+const MIN_TOKENS = 100;  // Reduced from 300 to capture shorter but valuable content
 const MAX_TOKENS = 800;
 const OVERLAP_TOKENS = 50;
 
@@ -70,8 +71,8 @@ const CONSENT_KEYWORDS = [
   'sletting',
 ];
 
-// Minimum word count for meaningful content
-const MIN_WORDS = 30;
+// Minimum word count for meaningful content - REDUCED to capture more info
+const MIN_WORDS = 15;  // Reduced from 30 to capture shorter informative texts
 
 // ============================================================================
 // TEXT CLEANING FUNCTIONS (from clean.ts)
@@ -234,7 +235,12 @@ function createChunks(
     
     if (currentTokens + sentenceTokens > MAX_TOKENS && currentChunk.length > 0) {
       const chunkContent = currentChunk.join(' ').trim();
-      if (chunkContent.length > 0 && estimateTokens(chunkContent) >= MIN_TOKENS) {
+      const chunkTokens = estimateTokens(chunkContent);
+      const hasValuableInfo = /\d/.test(chunkContent) || 
+        /åpning|åpent|pris|koster|adresse|telefon|epost|email|klokken|kl\./i.test(chunkContent);
+      
+      if (chunkContent.length > 0 && 
+          (chunkTokens >= MIN_TOKENS || (chunkTokens >= 50 && hasValuableInfo))) {
         chunks.push({
           id: `${baseId}-${chunkIndex}`,
           content: chunkContent,
@@ -306,7 +312,13 @@ function createChunks(
   
   if (currentChunk.length > 0) {
     const chunkContent = currentChunk.join(' ').trim();
-    if (chunkContent.length > 0 && (estimateTokens(chunkContent) >= MIN_TOKENS || chunks.length === 0)) {
+    const chunkTokens = estimateTokens(chunkContent);
+    // Accept chunks that meet MIN_TOKENS, OR are shorter but contain valuable info (numbers, etc.)
+    const hasValuableInfo = /\d/.test(chunkContent) || 
+      /åpning|åpent|pris|koster|adresse|telefon|epost|email|klokken|kl\./i.test(chunkContent);
+    
+    if (chunkContent.length > 0 && 
+        (chunkTokens >= MIN_TOKENS || chunks.length === 0 || (chunkTokens >= 50 && hasValuableInfo))) {
       chunks.push({
         id: `${baseId}-${chunkIndex}`,
         content: chunkContent,
@@ -357,21 +369,31 @@ function hasNavigationNoise(chunk: Chunk): boolean {
     'facebookinstagram',
   ];
   
-  if (chunk.content.length < 100) {
+  // More lenient - only filter if content is very short AND contains pure nav phrases
+  if (chunk.content.length < 50) {  // Reduced from 100
     if (pureNavPhrases.some(phrase => lowerContent.includes(phrase))) {
       return true;
     }
+  }
+  
+  // Don't filter if content contains valuable info (numbers, times, prices, etc.)
+  const hasValuableInfo = /\d/.test(chunk.content) || 
+    /åpning|åpent|pris|koster|adresse|telefon|epost|email/i.test(chunk.content);
+  
+  if (hasValuableInfo) {
+    return false; // Keep chunks with valuable info even if they have nav keywords
   }
   
   const navMatches = NAVIGATION_KEYWORDS.filter(keyword => 
     lowerContent.includes(keyword) || lowerSection.includes(keyword)
   );
   
-  if (navMatches.length >= 2 || (navMatches.length >= 1 && chunk.content.length < 80)) {
+  // More lenient - require more nav keywords or very short content
+  if (navMatches.length >= 3 || (navMatches.length >= 2 && chunk.content.length < 50)) {  // Reduced thresholds
     return true;
   }
   
-  if (lowerContent.match(/^(se (flere|alle|mer)|les mer)/) && chunk.content.length < 100) {
+  if (lowerContent.match(/^(se (flere|alle|mer)|les mer)/) && chunk.content.length < 50) {  // Reduced from 100
     return true;
   }
   
@@ -432,9 +454,13 @@ function canAnswerQuestion(chunk: Chunk): boolean {
   if (wordCount < MIN_WORDS) return false;
   if (hasFragmentedLanguage(chunk)) return false;
   
+  // More lenient - accept shorter content if it has meaningful words
+  // This helps capture info like "Åpningstider: Mandag-fredag 10-18" which is valuable
   const hasSubstantiveContent = 
-    content.length > 100 || 
-    content.match(/[a-zæøå]{4,}/i) !== null;
+    content.length > 50 ||  // Reduced from 100
+    content.match(/[a-zæøå]{4,}/i) !== null ||
+    // Accept content with numbers (often contains prices, hours, dates)
+    /\d/.test(content);
   
   return hasSubstantiveContent;
 }
@@ -457,7 +483,7 @@ function shouldKeepChunk(chunk: Chunk, seenContent: Set<string>): { keep: boolea
 // MAIN PROCESSING FUNCTION
 // ============================================================================
 
-function process(): void {
+function main(): void {
   try {
     console.log('📦 Starting combined processing: clean → chunk → clean chunks...\n');
     
@@ -639,4 +665,4 @@ function process(): void {
 }
 
 // Run the processing
-process();
+main();

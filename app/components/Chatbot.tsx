@@ -34,7 +34,7 @@ export default function Chatbot() {
   const [input, setInput] = useState('');
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -49,6 +49,15 @@ export default function Chatbot() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (textarea) {
+      textarea.style.height = 'auto';
+      textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`;
+    }
+  }, [input]);
 
   // Focus management
   useEffect(() => {
@@ -88,7 +97,7 @@ export default function Chatbot() {
   const initializeBot = () => {
     const welcomeMessage: Message = {
       role: 'assistant',
-      content: 'Hei! Jeg er Gabrielsen AI, din digitale assistent for Vollen Opplevelser. Hva kan jeg hjelpe deg med?',
+      content: 'Hei! 👋\n\nJeg er Gabrielsen AI, din digitale assistent for Vollen Opplevelser.\n\nHva kan jeg hjelpe deg med i dag?',
     };
     setMessages([welcomeMessage]);
     setTimeout(() => {
@@ -139,17 +148,17 @@ export default function Chatbot() {
   };
 
   const setTyping = (show: boolean) => {
-    const input = inputRef.current;
-    if (!input) return;
+    const textarea = inputRef.current;
+    if (!textarea) return;
 
     if (show) {
-      input.classList.add('typing');
-      input.placeholder = 'Gabrielsen AI tenker...';
-      input.disabled = true;
+      textarea.classList.add('typing');
+      textarea.placeholder = 'Gabrielsen AI tenker...';
+      textarea.disabled = true;
     } else {
-      input.classList.remove('typing');
-      input.placeholder = 'Skriv en melding …';
-      input.disabled = false;
+      textarea.classList.remove('typing');
+      textarea.placeholder = 'Skriv en melding …';
+      textarea.disabled = false;
     }
   };
 
@@ -333,9 +342,27 @@ export default function Chatbot() {
       if (input.trim() && !isLoading) {
         const messageText = input;
         setInput('');
+        // Reset textarea height
+        if (inputRef.current) {
+          inputRef.current.style.height = 'auto';
+        }
         sendMessage(messageText);
       }
     }, 200);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Send on Enter, new line on Shift+Enter
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (input.trim() && !isLoading) {
+        const form = e.currentTarget.closest('form');
+        if (form) {
+          const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
+          form.dispatchEvent(submitEvent);
+        }
+      }
+    }
   };
 
   const handleChipClick = (chipText: string) => {
@@ -530,16 +557,16 @@ export default function Chatbot() {
           autoComplete="off"
         >
           <div className="vb-bot__form-input-row">
-            <input
+            <textarea
               id="vbInput"
               ref={inputRef}
-              type="text"
-              inputMode="text"
               placeholder="Skriv en melding …"
               aria-label="Skriv en melding"
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
               disabled={isLoading}
+              rows={1}
             />
             <button id="vbSend" type="submit" disabled={isLoading || !input.trim()}>
               Send
