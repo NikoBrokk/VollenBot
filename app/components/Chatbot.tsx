@@ -17,16 +17,17 @@ interface Source {
 }
 
 const INITIAL_CHIPS = [
-  'Hva kan jeg gjøre hos Vollen Opplevelser?',
-  'Fortell meg om aktivitetene',
-  'Hva er åpningstider?',
-  'Hvor kan jeg finne mer informasjon?'
+  'Aktiviteter',
+  'Åpningstider',
+  'Kontakt',
+  'Arrangementer'
 ];
 
 export default function Chatbot() {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
   const [chips, setChips] = useState<string[]>(INITIAL_CHIPS);
   const [showChips, setShowChips] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
@@ -87,7 +88,7 @@ export default function Chatbot() {
   const initializeBot = () => {
     const welcomeMessage: Message = {
       role: 'assistant',
-      content: 'Hei! Jeg er VollenBot, din digitale assistent for Vollen Opplevelser. Hva kan jeg hjelpe deg med?',
+      content: 'Hei! Jeg er Gabrielsen AI, din digitale assistent for Vollen Opplevelser. Hva kan jeg hjelpe deg med?',
     };
     setMessages([welcomeMessage]);
     setTimeout(() => {
@@ -143,7 +144,7 @@ export default function Chatbot() {
 
     if (show) {
       input.classList.add('typing');
-      input.placeholder = 'VollenBot tenker...';
+      input.placeholder = 'Gabrielsen AI tenker...';
       input.disabled = true;
     } else {
       input.classList.remove('typing');
@@ -159,7 +160,23 @@ export default function Chatbot() {
     // Hide chips after first message
     setShowChips(false);
 
-    // Add user message
+    // Get conversation history BEFORE adding the new message
+    // This ensures we don't include the current message in history
+    // Exclude welcome message and error messages
+    const conversationHistory = messages
+      .filter((msg) => {
+        // Exclude error messages
+        if (msg.role === 'error') return false;
+        // Exclude welcome message (contains "Hei! Jeg er")
+        if (msg.role === 'assistant' && msg.content.includes('Hei! Jeg er')) return false;
+        return msg.role === 'user' || msg.role === 'assistant';
+      })
+      .map((msg) => ({
+        role: msg.role === 'assistant' ? 'assistant' : 'user',
+        content: msg.content,
+      }));
+
+    // Add user message to UI
     addMessage(trimmedMessage, 'user');
 
     // Show typing indicator
@@ -167,12 +184,16 @@ export default function Chatbot() {
     setTyping(true);
 
     try {
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: trimmedMessage }),
+        body: JSON.stringify({ 
+          message: trimmedMessage,
+          history: conversationHistory,
+        }),
       });
 
       if (!response.ok) {
@@ -201,17 +222,21 @@ export default function Chatbot() {
           throw new Error('No reader available for streaming');
         }
 
-        // Create initial assistant message
+        // Show thinking indicator while waiting for first token
+        setIsThinking(true);
+        setIsLoading(false);
+
+        // Create initial assistant message with empty content
         let assistantMessage: Message = {
           role: 'assistant',
           content: '',
           sources: [],
         };
         setMessages((prev) => [...prev, assistantMessage]);
-        setIsLoading(false); // Hide loading indicator once streaming starts
 
         let buffer = '';
         let sourcesReceived = false;
+        let firstTokenReceived = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -235,6 +260,12 @@ export default function Chatbot() {
                 const parsed = JSON.parse(data);
 
                 if (parsed.type === 'token') {
+                  // Hide thinking indicator on first token
+                  if (!firstTokenReceived) {
+                    setIsThinking(false);
+                    firstTokenReceived = true;
+                  }
+                  
                   // Append token to message content
                   setMessages((prev) => {
                     const updated = [...prev];
@@ -284,6 +315,7 @@ export default function Chatbot() {
       addMessage(errorMessage, 'error');
     } finally {
       setIsLoading(false);
+      setIsThinking(false);
       setTyping(false);
       inputRef.current?.focus();
     }
@@ -345,12 +377,12 @@ export default function Chatbot() {
         aria-haspopup="dialog"
         aria-expanded={isOpen}
         aria-controls="vbBotPanel"
-        aria-label="Åpne chat med VollenBot"
-        title="Åpne VollenBot"
+        aria-label="Åpne chat med Gabrielsen AI"
+        title="Åpne Gabrielsen AI"
       >
         <Image
           src="/assets/logo.png"
-          alt="VollenBot"
+          alt="Gabrielsen AI"
           width={108}
           height={108}
           priority
@@ -363,7 +395,7 @@ export default function Chatbot() {
         className="vb-bot__panel"
         role="dialog"
         aria-modal="true"
-        aria-label="VollenBot chat"
+        aria-label="Gabrielsen AI chat"
         aria-hidden={!isOpen}
       >
         <button
@@ -389,7 +421,7 @@ export default function Chatbot() {
                 {message.role === 'assistant' && (
                   <Image
                     src="/assets/logo.png"
-                    alt="VollenBot"
+                    alt="Gabrielsen AI"
                     width={24}
                     height={24}
                     className="vb-avatar-bot"
@@ -452,6 +484,25 @@ export default function Chatbot() {
                 </div>
               </li>
             ))}
+            {/* Thinking indicator - shows while waiting for first token */}
+            {isThinking && (
+              <li className="vb-bot__message vb-bot__message--assistant">
+                <Image
+                  src="/assets/logo.png"
+                  alt="Gabrielsen AI"
+                  width={24}
+                  height={24}
+                  className="vb-avatar-bot"
+                />
+                <div className="vb-thinking-bubble">
+                  <div className="vb-thinking-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                </div>
+              </li>
+            )}
             <div ref={messagesEndRef} />
           </ol>
 
@@ -505,7 +556,7 @@ export default function Chatbot() {
               rel="noopener"
               className="vb-footer-link"
             >
-              VollenBot
+              Gabrielsen AI
             </a>
           </div>
         </div>

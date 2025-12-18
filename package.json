@@ -8,6 +8,8 @@
     "chunk": "tsx scripts/chunk.ts",
     "embed": "tsx scripts/embed.ts",
     "test": "tsx scripts/test.ts",
+    "test-rag": "tsx scripts/test-rag.ts",
+    "evaluate": "tsx scripts/evaluate-index.ts",
     "build": "tsc",
     "dev": "next dev",
     "build:next": "next build",

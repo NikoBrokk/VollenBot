@@ -434,7 +434,7 @@ function canAnswerQuestion(chunk: Chunk): boolean {
   
   const hasSubstantiveContent = 
     content.length > 100 || 
-    content.match(/[a-zæøå]{4,}/i);
+    content.match(/[a-zæøå]{4,}/i) !== null;
   
   return hasSubstantiveContent;
 }

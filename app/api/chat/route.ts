@@ -21,6 +21,7 @@ const MATCH_THRESHOLD = 0.3;
 
 // Token management configuration
 const MAX_CONTEXT_TOKENS = 3000; // Maximum tokens for context (chunks)
+const MAX_HISTORY_TOKENS = 1000; // Maximum tokens for conversation history
 const TOKENS_PER_CHAR = 0.25; // Approximate tokens per character for Norwegian text (4 chars = 1 token)
 const MIN_CHUNK_TOKENS = 50; // Minimum tokens needed for a chunk to be useful
 
@@ -92,6 +93,7 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number; rese
 
 interface ChatRequest {
   message: string;
+  history?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
 interface Source {
@@ -147,21 +149,57 @@ function truncateToTokens(text: string, maxTokens: number): string {
 }
 
 /**
+ * Trim conversation history to fit within token limits
+ * Keeps the most recent messages (newest first)
+ */
+function trimHistory(
+  history: Array<{ role: 'user' | 'assistant'; content: string }>
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  let totalTokens = 0;
+  const trimmed: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  
+  // Process from newest to oldest (reverse order)
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    const msgTokens = estimateTokens(msg.content);
+    
+    if (totalTokens + msgTokens <= MAX_HISTORY_TOKENS) {
+      trimmed.unshift(msg); // Add to beginning to maintain order
+      totalTokens += msgTokens;
+    } else {
+      // If we can't fit the full message, try to truncate it
+      if (totalTokens < MAX_HISTORY_TOKENS * 0.9) {
+        // Only truncate if we have space for at least 90% of max
+        const remainingTokens = MAX_HISTORY_TOKENS - totalTokens;
+        if (remainingTokens >= MIN_CHUNK_TOKENS) {
+          const truncatedContent = truncateToTokens(msg.content, remainingTokens);
+          trimmed.unshift({ ...msg, content: truncatedContent });
+        }
+      }
+      break;
+    }
+  }
+  
+  return trimmed;
+}
+
+/**
  * Build context from matches with token management
  * Prioritizes chunks by similarity score and ensures we stay within token limits
  */
 function buildContextWithTokenManagement(
   matches: any[],
   systemPrompt: string,
-  userQuery: string
+  userQuery: string,
+  historyTokens: number = 0
 ): { context: string; selectedMatches: any[]; totalTokens: number } {
   // Estimate tokens for system prompt and user query
   const systemPromptTokens = estimateTokens(systemPrompt);
   const userQueryTokens = estimateTokens(userQuery);
   const contextPrefixTokens = estimateTokens('Kontekst:\n\nSpørsmål: '); // Prefix text
   
-  // Calculate available tokens for chunks
-  const reservedTokens = systemPromptTokens + userQueryTokens + contextPrefixTokens;
+  // Calculate available tokens for chunks (accounting for history)
+  const reservedTokens = systemPromptTokens + userQueryTokens + contextPrefixTokens + historyTokens;
   const availableTokens = MAX_CONTEXT_TOKENS - reservedTokens;
   
   // Safety margin to ensure we don't exceed
@@ -199,7 +237,7 @@ function buildContextWithTokenManagement(
     .map((match, index) => `[${index + 1}] ${match.content}`)
     .join('\n\n');
   
-  const totalTokens = systemPromptTokens + estimateTokens(context) + userQueryTokens + contextPrefixTokens;
+  const totalTokens = systemPromptTokens + estimateTokens(context) + userQueryTokens + contextPrefixTokens + historyTokens;
   
   return {
     context,
@@ -235,7 +273,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ChatRequest = await request.json();
-    const { message } = body;
+    const { message, history = [] } = body;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -279,7 +317,14 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // 3. Build context string from chunks with token management
+    // 3. Trim conversation history to fit within token limits
+    const trimmedHistory = trimHistory(history);
+    const historyTokens = trimmedHistory.reduce(
+      (sum, msg) => sum + estimateTokens(msg.content),
+      0
+    );
+
+    // 4. Build context string from chunks with token management
     const systemPrompt = `Du er en hyggelig, jovial, hjelpsom og lokalkjent assistent for Vollen Opplevelser.
 
 REGLER:
@@ -288,38 +333,47 @@ REGLER:
 - Norsk, vennlig tone, maks 4-5 linjer (kan utvide med punktliste hvis nødvendig)
 - Bruk markdown for punktlister og fet tekst der det hjelper
 - Ikke hallusiner: Hvis informasjonen mangler i konteksten, si tydelig at du ikke vet
-- Kun hvis informasjonen mangler: "Kontakt Vollen Opplevelser på opplevelser@askern.no"`;
+- Kun hvis informasjonen mangler: "Kontakt Vollen Opplevelser på opplevelser@askern.no"
+- Husk informasjon fra tidligere meldinger i samtalen når det er relevant`;
 
     const { context, selectedMatches, totalTokens } = buildContextWithTokenManagement(
       matches,
       systemPrompt,
-      message
+      message,
+      historyTokens
     );
 
     // Log token usage for monitoring
-    console.log(`Token usage: ${totalTokens}/${MAX_CONTEXT_TOKENS} tokens, ${selectedMatches.length}/${matches.length} chunks selected`);
+    console.log(`Token usage: ${totalTokens}/${MAX_CONTEXT_TOKENS} tokens, ${selectedMatches.length}/${matches.length} chunks selected, ${trimmedHistory.length}/${history.length} history messages`);
 
-    // 4. Prepare sources for response (use only the first selected match)
+    // 5. Prepare sources for response (use only the first selected match)
     const sources: Source[] = selectedMatches.slice(0, 1).map((match: any) => ({
       url: match.source_url || '',
       title: match.title || null,
       content: match.content || '',
     }));
 
-    // 5. Call OpenAI Chat API with streaming
+    // 5. Build messages array with history, context, and current query
+    const messagesForOpenAI = [
+      {
+        role: 'system' as const,
+        content: systemPrompt,
+      },
+      // Add conversation history (trimmed to fit token limits)
+      ...trimmedHistory,
+      // Add current query with context
+      {
+        role: 'user' as const,
+        content: `Kontekst:\n${context}\n\nSpørsmål: ${message}`,
+      },
+    ];
+
+    // 6. Call OpenAI Chat API with streaming
     console.log('Calling OpenAI Chat API with streaming...');
+    console.log(`Including ${trimmedHistory.length} history messages in context`);
     const chatStream = await openai.chat.completions.create({
       model: CHAT_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: systemPrompt,
-        },
-        {
-          role: 'user',
-          content: `Kontekst:\n${context}\n\nSpørsmål: ${message}`,
-        },
-      ],
+      messages: messagesForOpenAI,
       temperature: 0.7,
       max_tokens: 1000,
       stream: true, // Enable streaming
