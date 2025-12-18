@@ -4,15 +4,16 @@
   "description": "Crawl script for Vollen Opplevelser using Firecrawl API",
   "main": "dist/scripts/crawl.js",
   "scripts": {
+    "discover": "tsx scripts/discover-urls.ts",
     "crawl": "tsx scripts/crawl.ts",
     "chunk": "tsx scripts/chunk.ts",
     "embed": "tsx scripts/embed.ts",
     "test": "tsx scripts/test.ts",
     "test-rag": "tsx scripts/test-rag.ts",
     "evaluate": "tsx scripts/evaluate-index.ts",
-    "build": "tsc",
+    "build": "next build",
     "dev": "next dev",
-    "build:next": "next build",
+    "type-check": "tsc --noEmit",
     "start": "next start"
   },
   "keywords": [],

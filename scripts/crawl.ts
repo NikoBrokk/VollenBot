@@ -21,6 +21,7 @@ const API_KEY = process.env.FIRECRAWL_API_KEY;
 const START_URL = 'https://vollenopplevelser.no';
 const OUTPUT_DIR = path.join(process.cwd(), 'data', 'raw');
 const OUTPUT_FILE = path.join(OUTPUT_DIR, 'firecrawl_vollen.json');
+const DISCOVERED_URLS_FILE = path.join(OUTPUT_DIR, 'discovered_urls.json');
 
 if (!API_KEY) {
   console.error('Error: FIRECRAWL_API_KEY is not set in .env file');
@@ -422,21 +423,28 @@ function extractSectionsUnfiltered(markdown: string): Section[] {
 }
 
 /**
- * Map the website first to get all URLs, including from sitemap
+ * Load discovered URLs from file if it exists, otherwise use mapUrl
  */
-async function mapWebsite(): Promise<string[]> {
-  try {
-    console.log('📊 Mapping website to discover all pages (costs 1 credit)...\n');
-    
-    // First try to get sitemap URLs
+async function getUrlsToCrawl(): Promise<string[]> {
+  // First, try to load from discovered_urls.json (if discover script was run first)
+  if (fs.existsSync(DISCOVERED_URLS_FILE)) {
     try {
-      const sitemapUrl = `${START_URL}/sitemap_index.xml`;
-      console.log(`Checking sitemap at ${sitemapUrl}...`);
-      // Note: Firecrawl mapUrl should find these, but we can also try crawling the sitemap
+      console.log('📋 Loading URLs from discovered_urls.json...');
+      const urlsData = fs.readFileSync(DISCOVERED_URLS_FILE, 'utf-8');
+      const urls = JSON.parse(urlsData);
+      
+      if (Array.isArray(urls) && urls.length > 0) {
+        console.log(`✅ Loaded ${urls.length} URLs from discovered_urls.json\n`);
+        return urls;
+      }
     } catch (error) {
-      console.log('Could not access sitemap, will rely on mapUrl...');
+      console.warn('⚠️  Could not load discovered_urls.json, falling back to mapUrl...');
     }
-    
+  }
+  
+  // Fallback: Use mapUrl if discovered URLs file doesn't exist
+  console.log('📊 Using Firecrawl mapUrl to discover pages (costs 1 credit)...\n');
+  try {
     const mapResponse = await app.mapUrl(START_URL, {
       limit: 1000, // Find as many pages as possible within reason
     });
@@ -466,8 +474,8 @@ async function crawl(): Promise<void> {
   try {
     console.log(`🚀 Starting comprehensive crawl of ${START_URL}...\n`);
     
-    // First, map the website to find all URLs
-    const discoveredUrls = await mapWebsite();
+    // Get URLs to crawl (from discovered_urls.json if available, otherwise use mapUrl)
+    const discoveredUrls = await getUrlsToCrawl();
     
     // Use limit of 450 as per user's token budget
     const MAX_LIMIT = 450;

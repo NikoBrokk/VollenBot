@@ -578,7 +578,7 @@ export default function Chatbot() {
           <div className="vb-footer-text">
             Levert av{' '}
             <a
-              href="https://vollenopplevelser.no"
+              href="https://lupenobos.no"
               target="_blank"
               rel="noopener"
               className="vb-footer-link"
