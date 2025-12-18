@@ -235,6 +235,15 @@ body {
   gap: 8px;
 }
 
+/* Welcome message without avatar */
+.vb-bot__message--welcome {
+  display: block;
+}
+
+.vb-bot__message--welcome > div {
+  width: 100%;
+}
+
 /* Thinking Bubble */
 .vb-thinking-bubble {
   background: var(--vollen-light);

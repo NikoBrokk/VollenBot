@@ -405,11 +405,39 @@ function hasConsentText(chunk: Chunk): boolean {
   const lowerSection = chunk.section.toLowerCase();
   const lowerTitle = (chunk.title || '').toLowerCase();
   
-  return CONSENT_KEYWORDS.some(keyword => 
+  // Check if chunk contains consent keywords
+  const hasConsentKeyword = CONSENT_KEYWORDS.some(keyword => 
     lowerContent.includes(keyword) || 
     lowerSection.includes(keyword) ||
     lowerTitle.includes(keyword)
   );
+  
+  if (!hasConsentKeyword) {
+    return false; // No consent text found
+  }
+  
+  // If chunk has valuable info (numbers, times, prices, contact info), keep it
+  // Consent text might be mixed with important information
+  const hasValuableInfo = /\d/.test(chunk.content) || 
+    /åpning|åpent|pris|koster|adresse|telefon|epost|email|klokken|kl\.|åpner|stenger/i.test(chunk.content);
+  
+  if (hasValuableInfo && chunk.content.length > 100) {
+    return false; // Keep chunks with valuable info even if they mention consent
+  }
+  
+  // Only filter if chunk is mostly consent text (short and only consent keywords)
+  if (chunk.content.length < 200) {
+    const consentKeywordCount = CONSENT_KEYWORDS.filter(keyword => 
+      lowerContent.includes(keyword) || lowerSection.includes(keyword)
+    ).length;
+    
+    // If more than 2 consent keywords in a short chunk, it's likely just consent text
+    if (consentKeywordCount >= 2) {
+      return true;
+    }
+  }
+  
+  return hasConsentKeyword;
 }
 
 function isTooShort(chunk: Chunk): boolean {

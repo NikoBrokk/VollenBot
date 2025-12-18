@@ -440,12 +440,18 @@ export default function Chatbot() {
             role="log"
             aria-live="polite"
           >
-            {messages.map((message, index) => (
+            {messages.map((message, index) => {
+              // Check if this is the welcome message (first message, assistant, contains "Hei!")
+              const isWelcomeMessage = index === 0 && 
+                                      message.role === 'assistant' && 
+                                      (message.content.startsWith('Hei!') || message.content.includes('Hei! 👋'));
+              
+              return (
               <li
                 key={index}
-                className={`vb-bot__message vb-bot__message--${message.role}`}
+                className={`vb-bot__message vb-bot__message--${message.role} ${isWelcomeMessage ? 'vb-bot__message--welcome' : ''}`}
               >
-                {message.role === 'assistant' && (
+                {message.role === 'assistant' && !isWelcomeMessage && (
                   <Image
                     src="/assets/logo.png"
                     alt="Gabrielsen AI"
@@ -510,7 +516,8 @@ export default function Chatbot() {
                   )}
                 </div>
               </li>
-            ))}
+              );
+            })}
             {/* Thinking indicator - shows while waiting for first token */}
             {isThinking && (
               <li className="vb-bot__message vb-bot__message--assistant">

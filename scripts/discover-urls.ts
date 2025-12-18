@@ -46,7 +46,7 @@ function shouldExcludeUrl(url: string): boolean {
 /**
  * Fetch and parse XML sitemap
  */
-async function fetchSitemap(sitemapUrl: string): Promise<string[]> {
+async function fetchSitemap(sitemapUrl: string): Promise<{ urls: string[]; sitemaps: string[] }> {
   return new Promise((resolve, reject) => {
     const protocol = sitemapUrl.startsWith('https') ? https : http;
     
@@ -61,16 +61,24 @@ async function fetchSitemap(sitemapUrl: string): Promise<string[]> {
         try {
           // Parse XML sitemap
           const urlMatches = data.match(/<loc>(.*?)<\/loc>/g);
+          const urls: string[] = [];
+          const sitemaps: string[] = [];
+          
           if (urlMatches) {
-            const urls = urlMatches.map(match => {
-              const url = match.replace(/<\/?loc>/g, '');
-              return url.trim();
-            }).filter(url => url && url.startsWith('http'));
-            
-            resolve(urls);
-          } else {
-            resolve([]);
+            urlMatches.forEach(match => {
+              const url = match.replace(/<\/?loc>/g, '').trim();
+              if (url) {
+                // Check if it's a sitemap (sitemap_index.xml contains references to other sitemaps)
+                if (url.includes('sitemap') || url.endsWith('.xml')) {
+                  sitemaps.push(url);
+                } else if (url.startsWith('http')) {
+                  urls.push(url);
+                }
+              }
+            });
           }
+          
+          resolve({ urls, sitemaps });
         } catch (error) {
           reject(error);
         }
@@ -82,7 +90,7 @@ async function fetchSitemap(sitemapUrl: string): Promise<string[]> {
 }
 
 /**
- * Try to discover URLs from sitemap
+ * Try to discover URLs from sitemap (recursively follows sitemap_index.xml)
  */
 async function discoverFromSitemap(): Promise<string[]> {
   const sitemapUrls = [
@@ -92,21 +100,41 @@ async function discoverFromSitemap(): Promise<string[]> {
   ];
   
   const allUrls = new Set<string>();
+  const processedSitemaps = new Set<string>();
   
-  for (const sitemapUrl of sitemapUrls) {
+  async function processSitemap(sitemapUrl: string, depth = 0): Promise<void> {
+    // Prevent infinite recursion
+    if (depth > 3 || processedSitemaps.has(sitemapUrl)) {
+      return;
+    }
+    
+    processedSitemaps.add(sitemapUrl);
+    
     try {
-      console.log(`  📋 Trying ${sitemapUrl}...`);
-      const urls = await fetchSitemap(sitemapUrl);
+      console.log(`  📋 ${'  '.repeat(depth)}Trying ${sitemapUrl}...`);
+      const result = await fetchSitemap(sitemapUrl);
       
-      if (urls.length > 0) {
-        console.log(`  ✅ Found ${urls.length} URLs in sitemap`);
-        urls.forEach(url => allUrls.add(url));
-      } else {
-        console.log(`  ⚠️  Sitemap exists but contains no URLs`);
+      // Add URLs found in this sitemap
+      if (result.urls.length > 0) {
+        console.log(`  ✅ ${'  '.repeat(depth)}Found ${result.urls.length} URLs`);
+        result.urls.forEach(url => allUrls.add(url));
+      }
+      
+      // If this is a sitemap index, follow the referenced sitemaps
+      if (result.sitemaps.length > 0) {
+        console.log(`  📋 ${'  '.repeat(depth)}Found ${result.sitemaps.length} child sitemaps, following...`);
+        for (const childSitemap of result.sitemaps) {
+          await processSitemap(childSitemap, depth + 1);
+        }
       }
     } catch (error) {
-      console.log(`  ❌ Could not fetch ${sitemapUrl}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.log(`  ❌ ${'  '.repeat(depth)}Could not fetch ${sitemapUrl}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  }
+  
+  // Process all initial sitemap URLs
+  for (const sitemapUrl of sitemapUrls) {
+    await processSitemap(sitemapUrl);
   }
   
   return Array.from(allUrls);
@@ -214,6 +242,16 @@ async function discoverAllUrls(): Promise<void> {
         console.log(`   - ${type}`);
       });
       console.log('   (These might be on other pages or have different URL patterns)');
+      console.log('   💡 Tip: This info might be in footer/header of existing pages');
+    }
+    
+    // Analyze URL patterns to see if we're missing common page types
+    const hasCategoryPages = urlStrings.includes('/kategorier') || urlStrings.includes('/category');
+    const hasArchivePages = urlStrings.includes('/arkiv') || urlStrings.includes('/archive');
+    const hasTagPages = urlStrings.includes('/tag') || urlStrings.includes('/tag/');
+    
+    if (hasCategoryPages || hasArchivePages || hasTagPages) {
+      console.log('\n💡 Note: Found category/archive/tag pages - these might contain additional content');
     }
     
     // Save to file
