@@ -31,7 +31,7 @@ const REPORT_FILE = path.join(OUTPUT_DIR, 'cleaning_report.txt');
 
 // Chunking parameters - REDUCED to capture more content
 const MIN_TOKENS = 100;  // Reduced from 300 to capture shorter but valuable content
-const MAX_TOKENS = 800;
+const MAX_TOKENS = 1200; // Increased from 800 for better context per chunk
 const OVERLAP_TOKENS = 50;
 
 // Keywords for navigation/UI noise

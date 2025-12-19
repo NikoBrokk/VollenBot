@@ -18,9 +18,9 @@ interface Source {
 
 const INITIAL_CHIPS = [
   'Aktiviteter',
-  'Åpningstider',
+  'Hva skjer',
   'Kontakt',
-  'Arrangementer'
+  'Om Vollen'
 ];
 
 export default function Chatbot() {
@@ -153,11 +153,9 @@ export default function Chatbot() {
 
     if (show) {
       textarea.classList.add('typing');
-      textarea.placeholder = 'Gabrielsen AI tenker...';
       textarea.disabled = true;
     } else {
       textarea.classList.remove('typing');
-      textarea.placeholder = 'Skriv en melding …';
       textarea.disabled = false;
     }
   };
@@ -188,7 +186,8 @@ export default function Chatbot() {
     // Add user message to UI
     addMessage(trimmedMessage, 'user');
 
-    // Show typing indicator
+    // Show thinking indicator immediately
+    setIsThinking(true);
     setIsLoading(true);
     setTyping(true);
 
@@ -231,8 +230,7 @@ export default function Chatbot() {
           throw new Error('No reader available for streaming');
         }
 
-        // Show thinking indicator while waiting for first token
-        setIsThinking(true);
+        // Keep thinking indicator visible while waiting for first token
         setIsLoading(false);
 
         // Create initial assistant message with empty content
@@ -451,15 +449,6 @@ export default function Chatbot() {
                 key={index}
                 className={`vb-bot__message vb-bot__message--${message.role} ${isWelcomeMessage ? 'vb-bot__message--welcome' : ''}`}
               >
-                {message.role === 'assistant' && !isWelcomeMessage && (
-                  <Image
-                    src="/assets/logo.png"
-                    alt="Gabrielsen AI"
-                    width={24}
-                    height={24}
-                    className="vb-avatar-bot"
-                  />
-                )}
                 <div>
                   {message.role === 'assistant' ? (
                     <ReactMarkdown
@@ -521,13 +510,6 @@ export default function Chatbot() {
             {/* Thinking indicator - shows while waiting for first token */}
             {isThinking && (
               <li className="vb-bot__message vb-bot__message--assistant">
-                <Image
-                  src="/assets/logo.png"
-                  alt="Gabrielsen AI"
-                  width={24}
-                  height={24}
-                  className="vb-avatar-bot"
-                />
                 <div className="vb-thinking-bubble">
                   <div className="vb-thinking-dots">
                     <span></span>

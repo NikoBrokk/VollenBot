@@ -449,17 +449,6 @@ body {
   box-shadow: 0 0 0 2px rgba(254, 211, 167, 0.3);
 }
 
-.vb-bot__form input.typing,
-.vb-bot__form textarea.typing {
-  background: linear-gradient(135deg, #FFF4E6 0%, #FED3A7 100%);
-  color: var(--gray-800);
-  font-style: italic;
-}
-
-.vb-bot__form input.typing::placeholder,
-.vb-bot__form textarea.typing::placeholder {
-  animation: wave 1.5s ease-in-out infinite;
-}
 
 /* Send Button */
 .vb-bot__form button[type="submit"] {

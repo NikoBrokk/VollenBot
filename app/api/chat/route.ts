@@ -24,9 +24,9 @@ function getSupabaseClient() {
 
 const EMBEDDING_MODEL = 'text-embedding-3-small';
 const CHAT_MODEL = 'gpt-4o-mini';
-const MATCH_COUNT = 1;
+const MATCH_COUNT = 5; // Increased from 1 to get better context from multiple matches
 // Lowered threshold to allow more matches; we will still sort by similarity
-const MATCH_THRESHOLD = 0.3;
+const MATCH_THRESHOLD = 0.25; // Lowered from 0.3 to catch more relevant matches
 
 // Token management configuration
 const MAX_CONTEXT_TOKENS = 3000; // Maximum tokens for context (chunks)
@@ -41,6 +41,111 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000; // Time window in milliseconds (1 minute
 // In-memory rate limit store (Map<IP, { count: number, resetAt: number }>)
 // In production, consider using Redis or a database for distributed rate limiting
 const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
+// Static cache for quick action buttons (pre-generated responses)
+// These are hardcoded responses that are returned immediately without API calls
+interface StaticCacheEntry {
+  answer: string;
+  sources: Source[];
+}
+
+const STATIC_QUICK_ACTION_CACHE: Map<string, StaticCacheEntry> = new Map([
+  ['aktiviteter', {
+    answer: `Vollen tilbyr en rekke spennende aktiviteter for alle aldre! Her er noen av de populære:
+
+- **Håndballtrening** på Vollenhallen for barn i ulike aldersgrupper
+- **Utendørs trening** som bootcamp og lunsjtrening ved Vollen Fergekaia
+- **Båtsamling** i Vollen gjestehavn
+- **Barseltrening med baby** for nye mødre
+- **Gaming og e-sport** for barn (Onsdagsgaming)
+
+Vollen har også museum, galleri, badestrender og mange turmuligheter. Det er alltid noe å gjøre for både liten og stor!`,
+    sources: [{
+      url: 'https://vollenopplevelser.no',
+      title: 'Vollen opplevelser',
+      content: 'Vollen tilbyr en rekke tjenester som fanger essensen av stedets kultur og maritime sjel.'
+    }]
+  }],
+  ['hva skjer', {
+    answer: `På Vollen skjer det alltid noe! Du kan finne:
+
+- **Arrangementer og events** hele året
+- **Båtsamlinger** i gjestehavnen
+- **Trening og aktiviteter** på Vollenhallen og utendørs
+- **Kulturarrangement** som stolpejakt og andre lokale aktiviteter
+
+For å se hva som skjer akkurat nå, kan du sjekke "Aktuelt"-siden på vollenopplevelser.no. Der finner du oppdatert informasjon om kommende arrangementer og hendelser.`,
+    sources: [{
+      url: 'https://vollenopplevelser.no',
+      title: 'Hva skjer - Vollen',
+      content: 'Hva er på gang i Vollen i dag, i morgen eller neste helg? Her finnes det alltid noe å gjøre for både liten og stor.'
+    }]
+  }],
+  ['kontakt', {
+    answer: `Du kan kontakte Vollen Opplevelser på:
+
+**E-post:** opplevelser@askern.no
+
+**Adresse:** Vollenveien 13, 1390 Asker
+
+Har du forslag til arrangementer, tjenester, butikker eller andre tilbud? Vi vil gjerne høre fra deg!`,
+    sources: [{
+      url: 'https://vollenopplevelser.no/kontakt-oss',
+      title: 'Kontakt oss',
+      content: 'Vollenveien 13, 1390 Asker. Kontakt oss: opplevelser@askern.no'
+    }]
+  }],
+  ['om vollen', {
+    answer: `Vollen er et koselig og «passe stort» tettsted ved fjorden, cirka tre mil syd for Oslo.
+
+Her finner du:
+- **Butikker** (søndagsåpne)
+- **Spisesteder** med god mat
+- **Museum og galleri** for kulturinteresserte
+- **Båthavner** for maritime opplevelser
+- **Badestrender** for bading om sommeren
+- **Mange turmuligheter** i vakker natur
+
+Vollen er et levende kystsamfunn med stolte maritime tradisjoner, vakker natur og et mangfoldig næringsliv. Stedet byr på opplevelser hele året – for både fastboende og besøkende!`,
+    sources: [{
+      url: 'https://vollenopplevelser.no',
+      title: 'Om Vollen',
+      content: 'Vollen er et koselig og «passe stort» tettsted ved fjorden, cirka tre mil syd for Oslo. Her finner du butikker (søndagsåpne), spisesteder, museum, galleri, båthavner, badestrender, mange turmuligheter og aktivitetstilbud.'
+    }]
+  }]
+]);
+
+/**
+ * Normalize question text for cache key
+ */
+function normalizeQuestion(question: string): string {
+  return question.toLowerCase().trim();
+}
+
+/**
+ * Check if question is a quick action (has static cache)
+ */
+function isQuickAction(question: string): boolean {
+  const normalized = normalizeQuestion(question);
+  const hasCache = STATIC_QUICK_ACTION_CACHE.has(normalized);
+  console.log(`isQuickAction check: "${question}" -> "${normalized}" -> ${hasCache}`);
+  return hasCache;
+}
+
+/**
+ * Get static cached quick action response
+ */
+function getStaticQuickAction(question: string): StaticCacheEntry | null {
+  const normalized = normalizeQuestion(question);
+  const cached = STATIC_QUICK_ACTION_CACHE.get(normalized);
+  
+  if (cached) {
+    console.log(`Static cache HIT for quick action: ${normalized}`);
+    return cached;
+  }
+  
+  return null;
+}
 
 /**
  * Get client IP address from request
@@ -293,6 +398,64 @@ export async function POST(request: NextRequest) {
         { error: 'Message is required' },
         { status: 400 }
       );
+    }
+
+    // Check if this is a quick action with static cache
+    // Only use static cache if there's no conversation history (fresh question)
+    const normalizedMessage = normalizeQuestion(message);
+    console.log(`Checking quick action for: "${message}" (normalized: "${normalizedMessage}")`);
+    console.log(`History length: ${history.length}`);
+    console.log(`Is quick action: ${isQuickAction(message)}`);
+    
+    if (isQuickAction(message) && history.length === 0) {
+      const cached = getStaticQuickAction(message);
+      console.log(`Cached response found: ${cached ? 'YES' : 'NO'}`);
+      if (cached) {
+        console.log('Returning STATIC cached response - skipping all API calls');
+        // Return cached response as streaming (to match expected format)
+        // Stream quickly since it's pre-generated
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          async start(controller) {
+            try {
+              // Stream the cached answer in larger chunks for fast display
+              const answer = cached.answer;
+              const chunkSize = 50; // Larger chunks for faster display
+              
+              for (let i = 0; i < answer.length; i += chunkSize) {
+                const chunk = answer.slice(i, i + chunkSize);
+                const data = JSON.stringify({ type: 'token', data: chunk });
+                controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                // Minimal delay for smooth display
+                await new Promise(resolve => setTimeout(resolve, 5));
+              }
+              
+              // Send sources
+              const sourcesData = JSON.stringify({ type: 'sources', data: cached.sources });
+              controller.enqueue(encoder.encode(`data: ${sourcesData}\n\n`));
+              
+              // Send done signal
+              controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+              controller.close();
+            } catch (error) {
+              console.error('Error streaming cached response:', error);
+              controller.error(error);
+            }
+          },
+        });
+
+        return new NextResponse(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Cache': 'HIT',
+            'X-RateLimit-Limit': RATE_LIMIT_REQUESTS.toString(),
+            'X-RateLimit-Remaining': rateLimit.remaining.toString(),
+            'X-RateLimit-Reset': new Date(rateLimit.resetAt).toISOString(),
+          },
+        });
+      }
     }
 
     // 1. Create embedding for the user's message

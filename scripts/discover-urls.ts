@@ -10,6 +10,8 @@ dotenv.config();
 
 const API_KEY = process.env.FIRECRAWL_API_KEY;
 const START_URL = 'https://vollenopplevelser.no';
+const RELATED_DOMAIN = 'https://hvaskjeriasker.no'; // Related domain for events/arrangements
+const ALLOWED_DOMAINS = [START_URL, RELATED_DOMAIN];
 const OUTPUT_DIR = path.join(process.cwd(), 'data', 'raw');
 const URLS_FILE = path.join(OUTPUT_DIR, 'discovered_urls.json');
 
@@ -24,23 +26,39 @@ const app = new FirecrawlApp({ apiKey: API_KEY });
  * Check if a URL should be excluded
  */
 function shouldExcludeUrl(url: string): boolean {
-  const excludePatterns = [
-    '/login',
-    '/admin',
-    '/wp-admin',
-    '/wp-login',
-    '/wp-content',
-    '/wp-includes',
-    '/wp-json',
-    '/feed',
-    '/xml',
-    '/rss',
-    '/sitemap.xml', // Exclude sitemap files themselves
-    '/sitemap_index.xml',
-  ];
-
+  // Only exclude specific admin/system pages and sitemap files
+  // Be precise - don't exclude URLs that just happen to contain these strings
   const urlLower = url.toLowerCase();
-  return excludePatterns.some(pattern => urlLower.includes(pattern.toLowerCase()));
+  
+  // Exclude admin/login pages
+  if (urlLower.includes('/wp-admin') || 
+      urlLower.includes('/wp-login') ||
+      urlLower.includes('/wp-content') ||
+      urlLower.includes('/wp-includes') ||
+      urlLower.includes('/wp-json') ||
+      urlLower.includes('/login') ||
+      urlLower.includes('/admin')) {
+    return true;
+  }
+  
+  // Exclude feed/rss
+  if (urlLower.includes('/feed') || urlLower.includes('/rss')) {
+    return true;
+  }
+  
+  // Exclude sitemap XML files specifically (must end with .xml)
+  if (urlLower.endsWith('sitemap.xml') || 
+      urlLower.endsWith('sitemap.xml/') ||
+      urlLower.endsWith('sitemap_index.xml') ||
+      urlLower.endsWith('sitemap_index.xml/') ||
+      urlLower.endsWith('wp-sitemap.xml') ||
+      urlLower.endsWith('wp-sitemap.xml/') ||
+      urlLower.endsWith('page-sitemap.xml') ||
+      urlLower.endsWith('page-sitemap.xml/')) {
+    return true;
+  }
+  
+  return false;
 }
 
 /**
@@ -92,11 +110,11 @@ async function fetchSitemap(sitemapUrl: string): Promise<{ urls: string[]; sitem
 /**
  * Try to discover URLs from sitemap (recursively follows sitemap_index.xml)
  */
-async function discoverFromSitemap(): Promise<string[]> {
+async function discoverFromSitemap(baseUrl: string = START_URL): Promise<string[]> {
   const sitemapUrls = [
-    `${START_URL}/sitemap.xml`,
-    `${START_URL}/sitemap_index.xml`,
-    `${START_URL}/wp-sitemap.xml`,
+    `${baseUrl}/sitemap.xml`,
+    `${baseUrl}/sitemap_index.xml`,
+    `${baseUrl}/wp-sitemap.xml`,
   ];
   
   const allUrls = new Set<string>();
@@ -143,10 +161,10 @@ async function discoverFromSitemap(): Promise<string[]> {
 /**
  * Discover URLs using Firecrawl mapUrl
  */
-async function discoverFromMapUrl(): Promise<string[]> {
+async function discoverFromMapUrl(baseUrl: string = START_URL): Promise<string[]> {
   try {
-    console.log('  📊 Using Firecrawl mapUrl...');
-    const mapResponse = await app.mapUrl(START_URL, {
+    console.log(`  📊 Using Firecrawl mapUrl for ${baseUrl}...`);
+    const mapResponse = await app.mapUrl(baseUrl, {
       limit: 1000, // Maximum limit
       search: '', // Empty search to get all pages
     });
@@ -166,51 +184,151 @@ async function discoverFromMapUrl(): Promise<string[]> {
 }
 
 /**
+ * Crawl a specific page to extract links (useful for finding cross-domain links)
+ */
+async function discoverLinksFromPage(pageUrl: string): Promise<string[]> {
+  try {
+    console.log(`  🔗 Crawling ${pageUrl} to extract links...`);
+    const crawlResponse = await app.scrapeUrl(pageUrl, {
+      formats: ['links'],
+    });
+    
+    if (!crawlResponse.success || !crawlResponse.links) {
+      return [];
+    }
+    
+    const links = crawlResponse.links || [];
+    console.log(`  ✅ Found ${links.length} links on ${pageUrl}`);
+    return links;
+  } catch (error) {
+    console.error(`  ❌ Error crawling ${pageUrl}:`, error);
+    return [];
+  }
+}
+
+/**
+ * Check if URL is from an allowed domain
+ */
+function isAllowedDomain(url: string): boolean {
+  return ALLOWED_DOMAINS.some(domain => url.startsWith(domain));
+}
+
+/**
  * Main discovery function
  */
 async function discoverAllUrls(): Promise<void> {
   try {
-    console.log('🔍 Discovering ALL URLs on vollenopplevelser.no...\n');
+    console.log('🔍 Discovering ALL URLs on vollenopplevelser.no and related domains...\n');
     console.log('='.repeat(70));
     
     const allUrls = new Set<string>();
     
-    // Strategy 1: Try sitemap first (most reliable and complete)
-    console.log('\n1️⃣ Strategy 1: Checking sitemap...');
-    const sitemapUrls = await discoverFromSitemap();
+    // Strategy 1: Try sitemap first (most reliable and complete) - ONLY for vollenopplevelser.no
+    console.log('\n1️⃣ Strategy 1: Checking sitemap for vollenopplevelser.no...');
+    const sitemapUrls = await discoverFromSitemap(START_URL);
     sitemapUrls.forEach(url => allUrls.add(url));
     console.log(`   Total from sitemap: ${sitemapUrls.length}`);
     
-    // Strategy 2: Use Firecrawl mapUrl (finds pages by crawling links)
-    console.log('\n2️⃣ Strategy 2: Using Firecrawl mapUrl...');
-    const mapUrls = await discoverFromMapUrl();
+    // Strategy 2: Use Firecrawl mapUrl - ONLY for vollenopplevelser.no
+    console.log('\n2️⃣ Strategy 2: Using Firecrawl mapUrl for vollenopplevelser.no...');
+    const mapUrls = await discoverFromMapUrl(START_URL);
     mapUrls.forEach(url => allUrls.add(url));
     console.log(`   Total from mapUrl: ${mapUrls.length}`);
     
+    // Strategy 3: Crawl /hva-skjer page to find links to hvaskjeriasker.no
+    // This is the ONLY way we should discover hvaskjeriasker.no URLs
+    console.log('\n3️⃣ Strategy 3: Crawling /hva-skjer page for cross-domain links...');
+    const hvaSkjerUrl = `${START_URL}/hva-skjer`;
+    const hvaSkjerLinks = await discoverLinksFromPage(hvaSkjerUrl);
+    const crossDomainLinks = hvaSkjerLinks.filter(url => 
+      url.includes('hvaskjeriasker.no')
+    );
+    crossDomainLinks.forEach(url => allUrls.add(url));
+    console.log(`   Found ${crossDomainLinks.length} cross-domain event links from /hva-skjer`);
+    
     // Combine and filter
     const combinedUrls = Array.from(allUrls);
+    
+    // Debug: Track what's being filtered
+    const excludedByPattern = combinedUrls.filter(url => shouldExcludeUrl(url));
+    const excludedByDomain = combinedUrls.filter(url => !shouldExcludeUrl(url) && !isAllowedDomain(url));
+    
     const filteredUrls = combinedUrls
       .filter(url => !shouldExcludeUrl(url))
-      .filter(url => url.startsWith(START_URL)) // Only URLs from the same domain
+      .filter(url => {
+        // Allow all vollenopplevelser.no URLs
+        if (url.startsWith(START_URL)) {
+          return true;
+        }
+        // Only allow hvaskjeriasker.no URLs if they were found via /hva-skjer
+        // (they should already be in allUrls from Strategy 3)
+        if (url.startsWith(RELATED_DOMAIN)) {
+          return true; // These are already filtered by Strategy 3
+        }
+        return false;
+      })
       .sort(); // Sort for consistency
     
+    // Debug output
+    if (excludedByPattern.length > 0) {
+      console.log(`\n⚠️  Excluded ${excludedByPattern.length} URLs by exclude patterns:`);
+      excludedByPattern.slice(0, 10).forEach(url => console.log(`   - ${url}`));
+      if (excludedByPattern.length > 10) {
+        console.log(`   ... and ${excludedByPattern.length - 10} more`);
+      }
+    }
+    
+    if (excludedByDomain.length > 0) {
+      console.log(`\n⚠️  Excluded ${excludedByDomain.length} URLs by domain filter:`);
+      excludedByDomain.slice(0, 10).forEach(url => console.log(`   - ${url}`));
+      if (excludedByDomain.length > 10) {
+        console.log(`   ... and ${excludedByDomain.length - 10} more`);
+      }
+    }
+    
     // Remove duplicates (normalize URLs)
-    const normalizedUrls = new Set<string>();
+    const normalizedUrls = new Map<string, string>(); // Map from normalized to original
     filteredUrls.forEach(url => {
       // Normalize: remove trailing slashes, convert to lowercase for comparison
       const normalized = url.replace(/\/$/, '').toLowerCase();
-      normalizedUrls.add(url); // Keep original case
+      // Only keep the first occurrence (prefer without trailing slash)
+      if (!normalizedUrls.has(normalized)) {
+        normalizedUrls.set(normalized, url.replace(/\/$/, '')); // Remove trailing slash from stored version
+      }
     });
     
-    const finalUrls = Array.from(normalizedUrls).sort();
+    // Filter out explicit duplicates and suspicious variants
+    const finalUrls = Array.from(normalizedUrls.values())
+      .filter(url => {
+        const urlLower = url.toLowerCase();
+        // Remove explicit duplicates
+        if (urlLower.includes('-duplicate-duplicate') || urlLower.includes('-duplicate')) {
+          return false;
+        }
+        // Remove "-2" variants if there's a version without it
+        if (urlLower.endsWith('-2') || urlLower.endsWith('-2/')) {
+          const baseUrl = urlLower.replace(/-2\/?$/, '');
+          const hasBaseVersion = Array.from(normalizedUrls.values()).some(u => 
+            u.toLowerCase().replace(/\/$/, '') === baseUrl && !u.toLowerCase().includes('-2')
+          );
+          if (hasBaseVersion) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .sort();
     
     // Statistics
+    const vollenUrls = finalUrls.filter(url => url.startsWith(START_URL));
+    const askerUrls = finalUrls.filter(url => url.startsWith(RELATED_DOMAIN));
+    
     console.log('\n📊 Discovery Summary:');
     console.log('='.repeat(70));
-    console.log(`   URLs from sitemap: ${sitemapUrls.length}`);
-    console.log(`   URLs from mapUrl: ${mapUrls.length}`);
     console.log(`   Total unique URLs found: ${combinedUrls.length}`);
     console.log(`   After filtering: ${finalUrls.length}`);
+    console.log(`   From vollenopplevelser.no: ${vollenUrls.length}`);
+    console.log(`   From hvaskjeriasker.no: ${askerUrls.length}`);
     console.log(`   Excluded: ${combinedUrls.length - finalUrls.length}`);
     
     // Show some examples
