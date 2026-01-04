@@ -621,7 +621,7 @@ async function crawl(): Promise<void> {
           });
           
           // Wait for initial page load
-          await page.waitForTimeout(3000);
+          await new Promise(resolve => setTimeout(resolve, 3000));
           
           // Try to find and click "last inn mer" button multiple times
           let clickCount = 0;
@@ -667,7 +667,7 @@ async function crawl(): Promise<void> {
               });
               
               if (buttonFound) {
-                await page.waitForTimeout(2000); // Wait for content to load
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for content to load
                 clickCount++;
                 console.log(`    ✅ Clicked "last inn mer" (${clickCount}/${maxClicks})`);
               } else {
@@ -682,7 +682,7 @@ async function crawl(): Promise<void> {
           }
           
           // Wait a bit more for any final content to load
-          await page.waitForTimeout(2000);
+          await new Promise(resolve => setTimeout(resolve, 2000));
           
           // Get the final page content as markdown
           const htmlContent = await page.content();
