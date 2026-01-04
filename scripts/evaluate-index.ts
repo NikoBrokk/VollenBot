@@ -434,6 +434,25 @@ async function evaluateIndex(): Promise<void> {
       fs.mkdirSync(reportDir, { recursive: true });
     }
     
+    // Delete old evaluation files
+    try {
+      const files = fs.readdirSync(reportDir);
+      const oldEvaluationFiles = files.filter(file => 
+        file.startsWith('index-evaluation-') && file.endsWith('.txt')
+      );
+      
+      if (oldEvaluationFiles.length > 0) {
+        console.log(`   🗑️  Deleting ${oldEvaluationFiles.length} old evaluation file(s)...`);
+        oldEvaluationFiles.forEach(file => {
+          const filePath = path.join(reportDir, file);
+          fs.unlinkSync(filePath);
+        });
+        console.log(`   ✅ Old files deleted`);
+      }
+    } catch (error) {
+      console.warn(`   ⚠️  Could not delete old files: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+    
     const reportPath = path.join(reportDir, `index-evaluation-${Date.now()}.txt`);
     
     const report = [

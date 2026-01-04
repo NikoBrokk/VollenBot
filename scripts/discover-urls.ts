@@ -184,21 +184,43 @@ async function discoverFromMapUrl(baseUrl: string = START_URL): Promise<string[]
 }
 
 /**
- * Crawl a specific page to extract links (useful for finding cross-domain links)
+ * Normalize URL - remove trailing slash, handle www vs non-www
  */
-async function discoverLinksFromPage(pageUrl: string): Promise<string[]> {
+function normalizeUrl(url: string): string {
+  let normalized = url.replace(/\/$/, ''); // Remove trailing slash
+  // Convert www.hvaskjeriasker.no to hvaskjeriasker.no for canonical form
+  normalized = normalized.replace(/^https?:\/\/www\.hvaskjeriasker\.no/, 'https://hvaskjeriasker.no');
+  return normalized;
+}
+
+/**
+ * Get canonical form of URL for deduplication (lowercase, normalized)
+ */
+function getCanonicalUrl(url: string): string {
+  return normalizeUrl(url).toLowerCase();
+}
+
+/**
+ * Crawl a specific page to extract links with JS rendering support
+ */
+async function discoverLinksFromPage(pageUrl: string, options: {
+  waitFor?: number;
+} = {}): Promise<string[]> {
   try {
-    console.log(`  🔗 Crawling ${pageUrl} to extract links...`);
-    const crawlResponse = await app.scrapeUrl(pageUrl, {
+    const { waitFor = 3000 } = options;
+    
+    const scrapeOptions: any = {
       formats: ['links'],
-    });
+      waitFor,
+    };
+    
+    const crawlResponse = await app.scrapeUrl(pageUrl, scrapeOptions);
     
     if (!crawlResponse.success || !crawlResponse.links) {
       return [];
     }
     
     const links = crawlResponse.links || [];
-    console.log(`  ✅ Found ${links.length} links on ${pageUrl}`);
     return links;
   } catch (error) {
     console.error(`  ❌ Error crawling ${pageUrl}:`, error);
@@ -207,10 +229,141 @@ async function discoverLinksFromPage(pageUrl: string): Promise<string[]> {
 }
 
 /**
+ * Check if URL is a valid hvaskjeriasker.no event URL
+ */
+function isValidAskerEventUrl(url: string): boolean {
+  const urlLower = url.toLowerCase();
+  const normalized = normalizeUrl(urlLower);
+  
+  // Must be from hvaskjeriasker.no
+  if (!normalized.includes('hvaskjeriasker.no')) {
+    return false;
+  }
+  
+  // Must contain /arrangorer/ path
+  if (!normalized.includes('/arrangorer/')) {
+    return false;
+  }
+  
+  // Exclude system pages
+  if (normalized.includes('/logg-inn/') || 
+      normalized.includes('/login/') ||
+      normalized.includes('/admin/')) {
+    return false;
+  }
+  
+  return true;
+}
+
+/**
  * Check if URL is from an allowed domain
  */
 function isAllowedDomain(url: string): boolean {
-  return ALLOWED_DOMAINS.some(domain => url.startsWith(domain));
+  const normalized = normalizeUrl(url);
+  // Allow vollenopplevelser.no
+  if (normalized.startsWith(START_URL)) {
+    return true;
+  }
+  // Allow hvaskjeriasker.no but only event URLs
+  if (normalized.includes('hvaskjeriasker.no')) {
+    return isValidAskerEventUrl(url);
+  }
+  return false;
+}
+
+/**
+ * Discover event URLs from Hva skjer page with pagination and filters
+ */
+async function discoverHvaSkjerEventUrls(baseHvaSkjerUrl: string): Promise<Set<string>> {
+  const eventUrls = new Set<string>();
+  const canonicalUrls = new Set<string>(); // For deduplication
+  
+  console.log(`\n  📅 Discovering event URLs from ${baseHvaSkjerUrl}...`);
+  
+  // Normalize base URL (remove trailing slash, preserve query/hash if any)
+  const baseUrl = normalizeUrl(baseHvaSkjerUrl.split('?')[0].split('#')[0]);
+  const baseUrlObj = new URL(baseHvaSkjerUrl);
+  
+  // Try different filter options - build URLs with query params
+  const filterOptions = [
+    { name: 'all', params: {} },
+    { name: 'today', params: { filter: 'today' } },
+    { name: 'this_week', params: { filter: 'this_week' } },
+    { name: 'this_month', params: { filter: 'this_month' } },
+  ];
+  
+  for (const filterOption of filterOptions) {
+    console.log(`\n    🔍 Filter: ${filterOption.name}`);
+    
+    // Build URL with filter params
+    const filterUrlObj = new URL(baseUrl);
+    Object.entries(filterOption.params).forEach(([key, value]) => {
+      filterUrlObj.searchParams.set(key, value);
+    });
+    let currentUrl = filterUrlObj.toString();
+    
+    let iteration = 0;
+    const maxIterations = 20;
+    let allLinksForThisFilter = new Set<string>();
+    
+    while (iteration < maxIterations) {
+      iteration++;
+      
+      console.log(`      Page ${iteration}: ${currentUrl}`);
+      
+      const links = await discoverLinksFromPage(currentUrl, {
+        waitFor: 4000, // Wait for JS rendering and cookie banner
+      });
+      
+      // Filter for hvaskjeriasker.no event URLs
+      const eventLinks = links.filter(url => isValidAskerEventUrl(url));
+      
+      // Add new unique URLs
+      let newUrlsCount = 0;
+      const linksBefore = allLinksForThisFilter.size;
+      
+      for (const url of eventLinks) {
+        const canonical = getCanonicalUrl(url);
+        if (!canonicalUrls.has(canonical)) {
+          canonicalUrls.add(canonical);
+          eventUrls.add(normalizeUrl(url));
+          allLinksForThisFilter.add(canonical);
+          newUrlsCount++;
+        }
+      }
+      
+      const linksAfter = allLinksForThisFilter.size;
+      console.log(`        Found ${eventLinks.length} event links, ${newUrlsCount} new (total for filter: ${linksAfter})`);
+      
+      // Stop if no new links found (after first page)
+      if (newUrlsCount === 0 && iteration > 1) {
+        console.log(`        No new links found, stopping pagination for this filter`);
+        break;
+      }
+      
+      // Try to find pagination - check if there's a "next page" pattern
+      // For now, we'll try incrementing page parameter if it exists, or stop
+      const urlObj = new URL(currentUrl);
+      const currentPage = parseInt(urlObj.searchParams.get('page') || '0');
+      
+      // If we got new links, try next page
+      if (newUrlsCount > 0 && currentPage < 50) { // Safety limit
+        urlObj.searchParams.set('page', String(currentPage + 1));
+        currentUrl = urlObj.toString();
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      } else {
+        // No pagination or reached limit
+        break;
+      }
+    }
+    
+    console.log(`    ✅ Filter ${filterOption.name}: ${allLinksForThisFilter.size} unique event URLs`);
+  }
+  
+  console.log(`\n  ✅ Total unique event URLs found: ${eventUrls.size}`);
+  return eventUrls;
 }
 
 /**
@@ -235,16 +388,17 @@ async function discoverAllUrls(): Promise<void> {
     mapUrls.forEach(url => allUrls.add(url));
     console.log(`   Total from mapUrl: ${mapUrls.length}`);
     
-    // Strategy 3: Crawl /hva-skjer page to find links to hvaskjeriasker.no
+    // Strategy 3: Discover event URLs from Hva skjer section with pagination and filters
     // This is the ONLY way we should discover hvaskjeriasker.no URLs
-    console.log('\n3️⃣ Strategy 3: Crawling /hva-skjer page for cross-domain links...');
+    console.log('\n3️⃣ Strategy 3: Discovering event URLs from Hva skjer section...');
+    
+    // Use base URL (normalization will handle trailing slash)
     const hvaSkjerUrl = `${START_URL}/hva-skjer`;
-    const hvaSkjerLinks = await discoverLinksFromPage(hvaSkjerUrl);
-    const crossDomainLinks = hvaSkjerLinks.filter(url => 
-      url.includes('hvaskjeriasker.no')
-    );
-    crossDomainLinks.forEach(url => allUrls.add(url));
-    console.log(`   Found ${crossDomainLinks.length} cross-domain event links from /hva-skjer`);
+    const eventUrls = await discoverHvaSkjerEventUrls(hvaSkjerUrl);
+    
+    // Add all event URLs to the main set
+    eventUrls.forEach(url => allUrls.add(url));
+    console.log(`\n   ✅ Total unique event URLs found: ${eventUrls.size}`);
     
     // Combine and filter
     const combinedUrls = Array.from(allUrls);
@@ -256,17 +410,18 @@ async function discoverAllUrls(): Promise<void> {
     const filteredUrls = combinedUrls
       .filter(url => !shouldExcludeUrl(url))
       .filter(url => {
+        const normalized = normalizeUrl(url);
         // Allow all vollenopplevelser.no URLs
-        if (url.startsWith(START_URL)) {
+        if (normalized.startsWith(START_URL)) {
           return true;
         }
-        // Only allow hvaskjeriasker.no URLs if they were found via /hva-skjer
-        // (they should already be in allUrls from Strategy 3)
-        if (url.startsWith(RELATED_DOMAIN)) {
-          return true; // These are already filtered by Strategy 3
+        // Only allow hvaskjeriasker.no event URLs (already filtered in Strategy 3)
+        if (normalized.includes('hvaskjeriasker.no')) {
+          return isValidAskerEventUrl(url);
         }
         return false;
       })
+      .map(url => normalizeUrl(url)) // Normalize all URLs
       .sort(); // Sort for consistency
     
     // Debug output
@@ -286,14 +441,13 @@ async function discoverAllUrls(): Promise<void> {
       }
     }
     
-    // Remove duplicates (normalize URLs)
-    const normalizedUrls = new Map<string, string>(); // Map from normalized to original
+    // Remove duplicates using canonical form
+    const normalizedUrls = new Map<string, string>(); // Map from canonical to normalized
     filteredUrls.forEach(url => {
-      // Normalize: remove trailing slashes, convert to lowercase for comparison
-      const normalized = url.replace(/\/$/, '').toLowerCase();
-      // Only keep the first occurrence (prefer without trailing slash)
-      if (!normalizedUrls.has(normalized)) {
-        normalizedUrls.set(normalized, url.replace(/\/$/, '')); // Remove trailing slash from stored version
+      const canonical = getCanonicalUrl(url);
+      // Only keep the first occurrence
+      if (!normalizedUrls.has(canonical)) {
+        normalizedUrls.set(canonical, normalizeUrl(url));
       }
     });
     
@@ -320,25 +474,36 @@ async function discoverAllUrls(): Promise<void> {
       .sort();
     
     // Statistics
-    const vollenUrls = finalUrls.filter(url => url.startsWith(START_URL));
-    const askerUrls = finalUrls.filter(url => url.startsWith(RELATED_DOMAIN));
+    const vollenUrls = finalUrls.filter(url => normalizeUrl(url).startsWith(START_URL));
+    const askerUrls = finalUrls.filter(url => normalizeUrl(url).includes('hvaskjeriasker.no'));
     
     console.log('\n📊 Discovery Summary:');
     console.log('='.repeat(70));
     console.log(`   Total unique URLs found: ${combinedUrls.length}`);
     console.log(`   After filtering: ${finalUrls.length}`);
     console.log(`   From vollenopplevelser.no: ${vollenUrls.length}`);
-    console.log(`   From hvaskjeriasker.no: ${askerUrls.length}`);
+    console.log(`   From hvaskjeriasker.no (event URLs): ${askerUrls.length}`);
     console.log(`   Excluded: ${combinedUrls.length - finalUrls.length}`);
     
-    // Show some examples
-    if (finalUrls.length > 0) {
-      console.log('\n📋 Sample URLs (first 10):');
-      finalUrls.slice(0, 10).forEach((url, idx) => {
+    // Show sample event URLs
+    if (askerUrls.length > 0) {
+      console.log(`\n📋 Sample event URLs (first 5):`);
+      askerUrls.slice(0, 5).forEach((url, idx) => {
         console.log(`   ${idx + 1}. ${url}`);
       });
-      if (finalUrls.length > 10) {
-        console.log(`   ... and ${finalUrls.length - 10} more`);
+      if (askerUrls.length > 5) {
+        console.log(`   ... and ${askerUrls.length - 5} more event URLs`);
+      }
+    }
+    
+    // Show some examples of vollen URLs
+    if (vollenUrls.length > 0) {
+      console.log(`\n📋 Sample vollenopplevelser.no URLs (first 5):`);
+      vollenUrls.slice(0, 5).forEach((url, idx) => {
+        console.log(`   ${idx + 1}. ${url}`);
+      });
+      if (vollenUrls.length > 5) {
+        console.log(`   ... and ${vollenUrls.length - 5} more URLs`);
       }
     }
     

@@ -423,9 +423,35 @@ function extractSectionsUnfiltered(markdown: string): Section[] {
 }
 
 /**
+ * Get URLs that have already been crawled
+ */
+function getAlreadyCrawledUrls(): Set<string> {
+  const crawledUrls = new Set<string>();
+  
+  if (fs.existsSync(OUTPUT_FILE)) {
+    try {
+      const existingData = fs.readFileSync(OUTPUT_FILE, 'utf-8');
+      const existingPages: PageData[] = JSON.parse(existingData);
+      
+      existingPages.forEach(page => {
+        // Normalize URL (remove trailing slash) for comparison
+        const normalizedUrl = page.source_url.replace(/\/$/, '');
+        crawledUrls.add(normalizedUrl);
+      });
+      
+      console.log(`📚 Found ${crawledUrls.size} already crawled URLs in ${OUTPUT_FILE}`);
+    } catch (error) {
+      console.warn('⚠️  Could not read existing crawl file, will crawl all URLs');
+    }
+  }
+  
+  return crawledUrls;
+}
+
+/**
  * Load discovered URLs from file if it exists, otherwise use mapUrl
  */
-async function getUrlsToCrawl(): Promise<string[]> {
+async function getUrlsToCrawl(forceAll: boolean = false): Promise<string[]> {
   // First, try to load from discovered_urls.json (if discover script was run first)
   if (fs.existsSync(DISCOVERED_URLS_FILE)) {
     try {
@@ -434,8 +460,27 @@ async function getUrlsToCrawl(): Promise<string[]> {
       const urls = JSON.parse(urlsData);
       
       if (Array.isArray(urls) && urls.length > 0) {
-        console.log(`✅ Loaded ${urls.length} URLs from discovered_urls.json\n`);
-        return urls;
+        console.log(`✅ Loaded ${urls.length} URLs from discovered_urls.json`);
+        
+        // Filter out already crawled URLs unless forceAll is true
+        if (!forceAll) {
+          const alreadyCrawled = getAlreadyCrawledUrls();
+          const newUrls = urls.filter((url: string) => {
+            const normalizedUrl = url.replace(/\/$/, '');
+            return !alreadyCrawled.has(normalizedUrl);
+          });
+          
+          const skippedCount = urls.length - newUrls.length;
+          if (skippedCount > 0) {
+            console.log(`⏭️  Skipping ${skippedCount} already crawled URLs`);
+            console.log(`📝 Will crawl ${newUrls.length} new URLs\n`);
+          }
+          
+          return newUrls;
+        } else {
+          console.log(`🔄 Force mode: Will crawl all ${urls.length} URLs (including already crawled)\n`);
+          return urls;
+        }
       }
     } catch (error) {
       console.warn('⚠️  Could not load discovered_urls.json, falling back to mapUrl...');
@@ -457,10 +502,25 @@ async function getUrlsToCrawl(): Promise<string[]> {
     const allLinks = mapResponse.links || [];
     const filteredLinks = allLinks.filter(link => !shouldExcludeUrl(link));
     
-    console.log(`📄 Found ${allLinks.length} total pages, ${filteredLinks.length} valid pages after filtering`);
-    console.log(`💰 Estimated cost: ${filteredLinks.length} credits (1 credit per page)\n`);
+    // Filter out already crawled URLs unless forceAll is true
+    let urlsToCrawl = filteredLinks;
+    if (!forceAll) {
+      const alreadyCrawled = getAlreadyCrawledUrls();
+      urlsToCrawl = filteredLinks.filter((url: string) => {
+        const normalizedUrl = url.replace(/\/$/, '');
+        return !alreadyCrawled.has(normalizedUrl);
+      });
+      
+      const skippedCount = filteredLinks.length - urlsToCrawl.length;
+      if (skippedCount > 0) {
+        console.log(`⏭️  Skipping ${skippedCount} already crawled URLs`);
+      }
+    }
     
-    return filteredLinks;
+    console.log(`📄 Found ${allLinks.length} total pages, ${urlsToCrawl.length} to crawl`);
+    console.log(`💰 Estimated cost: ${urlsToCrawl.length} credits (1 credit per page)\n`);
+    
+    return urlsToCrawl;
   } catch (error) {
     console.warn('Could not map website:', error);
     return [];
@@ -472,10 +532,17 @@ async function getUrlsToCrawl(): Promise<string[]> {
  */
 async function crawl(): Promise<void> {
   try {
+    // Check for --force flag to crawl all URLs even if already crawled
+    const forceAll = process.argv.includes('--force') || process.argv.includes('-f');
+    
+    if (forceAll) {
+      console.log('🔄 FORCE MODE: Will crawl all URLs including already crawled ones\n');
+    }
+    
     console.log(`🚀 Starting comprehensive crawl of ${START_URL}...\n`);
     
     // Get URLs to crawl (from discovered_urls.json if available, otherwise use mapUrl)
-    const discoveredUrls = await getUrlsToCrawl();
+    const discoveredUrls = await getUrlsToCrawl(forceAll);
     
     // Use limit of 450 as per user's token budget
     const MAX_LIMIT = 450;
@@ -510,10 +577,240 @@ async function crawl(): Promise<void> {
     const RETRY_DELAY_BASE = 5000; // 5 seconds initial retry delay
     
     /**
+     * Check if URL is the main "opplev-vollen" page that needs "last inn mer" clicks
+     */
+    function needsLoadMoreClicks(url: string): boolean {
+      const normalized = url.toLowerCase().replace(/\/$/, '');
+      return normalized.includes('/opplev-vollen') && 
+             !normalized.includes('/opplev-vollen/') && // Only the main page, not sub-pages
+             (normalized.endsWith('/opplev-vollen') || normalized.endsWith('opplev-vollen'));
+    }
+
+    /**
+     * Scrape /opplev-vollen page with special handling to click "last inn mer" multiple times
+     * Uses Puppeteer to interact with the page and click the button
+     */
+    async function scrapeOpplevVollenPage(url: string): Promise<any | null> {
+      try {
+        console.log('  🔄 Using Puppeteer for /opplev-vollen page to click "last inn mer"...');
+        
+        // Dynamic import of puppeteer (only load if needed)
+        const puppeteer = await import('puppeteer').catch(() => null);
+        
+        if (!puppeteer) {
+          console.log('  ⚠️  Puppeteer not installed, falling back to extended wait method...');
+          console.log('  💡 Install puppeteer with: npm install puppeteer');
+          return await scrapeUrlWithExtendedWait(url);
+        }
+
+        const browser = await puppeteer.default.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        });
+        
+        try {
+          const page = await browser.newPage();
+          
+          // Set a reasonable viewport
+          await page.setViewport({ width: 1920, height: 1080 });
+          
+          // Navigate to the page
+          await page.goto(url, { 
+            waitUntil: 'networkidle2',
+            timeout: 30000 
+          });
+          
+          // Wait for initial page load
+          await page.waitForTimeout(3000);
+          
+          // Try to find and click "last inn mer" button multiple times
+          let clickCount = 0;
+          const maxClicks = 20; // Maximum number of clicks to prevent infinite loops
+          
+          while (clickCount < maxClicks) {
+            try {
+              // Find the button using JavaScript evaluation (more reliable than CSS selectors)
+              const buttonFound = await page.evaluate(() => {
+                // Find all buttons and links
+                const allElements = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                
+                // Look for element containing "Last inn mer" or "LAST INN MER"
+                const loadMoreButton = allElements.find((el: any) => {
+                  const text = el.textContent?.trim() || el.innerText?.trim() || '';
+                  return text.includes('Last inn mer') || 
+                         text.includes('LAST INN MER') ||
+                         text.includes('last inn mer') ||
+                         el.getAttribute('aria-label')?.includes('Last inn') ||
+                         el.className?.includes('load-more') ||
+                         el.className?.includes('loadMore');
+                });
+                
+                if (loadMoreButton) {
+                  // Check if button is visible
+                  const rect = (loadMoreButton as HTMLElement).getBoundingClientRect();
+                  const style = window.getComputedStyle(loadMoreButton as HTMLElement);
+                  const isVisible = rect.width > 0 && 
+                                   rect.height > 0 && 
+                                   style.display !== 'none' &&
+                                   style.visibility !== 'hidden' &&
+                                   style.opacity !== '0';
+                  
+                  if (isVisible) {
+                    // Scroll button into view
+                    (loadMoreButton as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    // Click the button
+                    (loadMoreButton as HTMLElement).click();
+                    return true;
+                  }
+                }
+                return false;
+              });
+              
+              if (buttonFound) {
+                await page.waitForTimeout(2000); // Wait for content to load
+                clickCount++;
+                console.log(`    ✅ Clicked "last inn mer" (${clickCount}/${maxClicks})`);
+              } else {
+                console.log(`    ℹ️  No more "last inn mer" buttons found after ${clickCount} clicks`);
+                break;
+              }
+            } catch (error) {
+              // If clicking fails, we're probably done
+              console.log(`    ⚠️  Error clicking button: ${error}`);
+              break;
+            }
+          }
+          
+          // Wait a bit more for any final content to load
+          await page.waitForTimeout(2000);
+          
+          // Get the final page content as markdown
+          const htmlContent = await page.content();
+          
+          // Use Firecrawl to convert HTML to markdown
+          // We'll create a temporary data structure and use Firecrawl's markdown conversion
+          const markdownResponse = await app.scrapeUrl(url, {
+            formats: ['markdown'],
+            onlyMainContent: false,
+            waitFor: 0, // Don't wait, we already have the content
+            excludeTags: ['script', 'style', 'noscript'],
+            includeTags: [
+              'main', 'article', 'section', 'nav', 'footer', 'header', 'aside',
+              'div', 'p', 'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+            ],
+          });
+          
+          // Actually, we need to get the content from Puppeteer and convert it
+          // Let's use page.evaluate to get the text content
+          const pageText = await page.evaluate(() => {
+            // Remove script and style elements
+            const scripts = document.querySelectorAll('script, style, noscript');
+            scripts.forEach(el => el.remove());
+            
+            // Get main content
+            const main = document.querySelector('main') || document.body;
+            return main.innerText || main.textContent || '';
+          });
+          
+          // Get page title before closing
+          const pageTitle = await page.title();
+          
+          // Create a markdown-like structure from the text
+          // We'll structure it similar to how Firecrawl does it
+          const markdown = `# ${pageTitle}\n\n${pageText}`;
+          
+          await browser.close();
+          
+          console.log(`  ✅ Successfully loaded page with ${clickCount} "last inn mer" clicks`);
+          
+          return {
+            url: url,
+            markdown: markdown,
+            metadata: {
+              title: pageTitle,
+            },
+          };
+        } catch (error) {
+          await browser.close();
+          throw error;
+        }
+      } catch (error) {
+        console.warn(`  ⚠️  Error in Puppeteer handling: ${error}`);
+        // Fallback to extended wait method
+        return await scrapeUrlWithExtendedWait(url);
+      }
+    }
+
+    /**
+     * Scrape URL with extended wait time and multiple attempts to catch dynamically loaded content
+     * This is a fallback method when Puppeteer is not available
+     */
+    async function scrapeUrlWithExtendedWait(url: string): Promise<any | null> {
+      console.log('  ⏳ Using extended wait method (may not capture all "last inn mer" content)...');
+      
+      // Try scraping multiple times with increasing wait times to catch lazy-loaded content
+      const waitTimes = [10000, 15000, 20000]; // Longer wait times for JavaScript to render
+      let bestResult: any = null;
+      let maxContentLength = 0;
+
+      for (const waitTime of waitTimes) {
+        try {
+          console.log(`    Trying with ${waitTime / 1000}s wait...`);
+          const scrapeResponse = await app.scrapeUrl(url, {
+            formats: ['markdown'],
+            onlyMainContent: false,
+            waitFor: waitTime, // Wait for JavaScript to render
+            excludeTags: ['script', 'style', 'noscript'],
+            includeTags: [
+              'main', 'article', 'section', 'nav', 'footer', 'header', 'aside',
+              'div', 'p', 'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+            ],
+          });
+
+          if (scrapeResponse.success) {
+            const responseData = scrapeResponse as any;
+            const content = responseData.data?.markdown || responseData.markdown || '';
+            const contentLength = content.length;
+
+            console.log(`    Got ${contentLength} characters of content`);
+
+            // Keep the result with the most content (likely has all businesses loaded)
+            if (contentLength > maxContentLength) {
+              maxContentLength = contentLength;
+              bestResult = responseData.data || scrapeResponse;
+              if (!bestResult.url && !bestResult.sourceURL) {
+                bestResult.url = url;
+              }
+            }
+          }
+        } catch (error) {
+          // Continue to next wait time
+          console.warn(`    Error with ${waitTime / 1000}s wait: ${error}`);
+          continue;
+        }
+      }
+
+      if (bestResult) {
+        console.log(`  ✅ Best result: ${maxContentLength} characters`);
+      } else {
+        console.warn(`  ⚠️  No successful scrape with extended wait method`);
+      }
+
+      return bestResult;
+    }
+
+    /**
      * Scrape a single URL with retry logic and exponential backoff
+     * Special handling for /opplev-vollen page to click "last inn mer" button
      */
     async function scrapeUrlWithRetry(url: string, retryCount = 0): Promise<any | null> {
       try {
+        // Special handling for /opplev-vollen page
+        if (needsLoadMoreClicks(url)) {
+          return await scrapeOpplevVollenPage(url);
+        }
+
+        // Regular scraping for other pages
         const scrapeResponse = await app.scrapeUrl(url, {
           formats: ['markdown'],
           onlyMainContent: false, // Get ALL content including nav/footer/header
@@ -633,15 +930,27 @@ async function crawl(): Promise<void> {
     
     console.log(`\n📥 Crawled ${rawPages.length} raw pages\n`);
     
-    // Process ALL pages - no filtering, we keep everything for later cleaning
-    const processedPages: PageData[] = [];
+    // Load existing pages if file exists and we're not in force mode
+    let existingPages: PageData[] = [];
+    if (!forceAll && fs.existsSync(OUTPUT_FILE)) {
+      try {
+        const existingData = fs.readFileSync(OUTPUT_FILE, 'utf-8');
+        existingPages = JSON.parse(existingData);
+        console.log(`📚 Loaded ${existingPages.length} existing pages from ${OUTPUT_FILE}`);
+      } catch (error) {
+        console.warn('⚠️  Could not load existing crawl file, starting fresh');
+      }
+    }
+    
+    // Process new pages - no filtering, we keep everything for later cleaning
+    const processedNewPages: PageData[] = [];
     let skippedCount = 0;
     
     for (const rawPage of rawPages) {
       try {
         const processed = processPageData(rawPage);
         if (processed) {
-          processedPages.push(processed);
+          processedNewPages.push(processed);
         } else {
           skippedCount++; // Only admin/system pages are skipped
         }
@@ -651,32 +960,55 @@ async function crawl(): Promise<void> {
       }
     }
     
-    console.log(`✅ Successfully processed ${processedPages.length} pages (ALL content preserved)`);
+    console.log(`✅ Successfully processed ${processedNewPages.length} new pages (ALL content preserved)`);
     console.log(`❌ Skipped ${skippedCount} pages (admin/system pages only)\n`);
+    
+    // Merge with existing pages (update if URL exists, otherwise append)
+    const urlMap = new Map<string, PageData>();
+    
+    // Add existing pages first
+    existingPages.forEach(page => {
+      const normalizedUrl = page.source_url.replace(/\/$/, '');
+      urlMap.set(normalizedUrl, page);
+    });
+    
+    // Update/add new pages (new pages override existing ones with same URL)
+    processedNewPages.forEach(page => {
+      const normalizedUrl = page.source_url.replace(/\/$/, '');
+      urlMap.set(normalizedUrl, page);
+    });
+    
+    const allPages = Array.from(urlMap.values());
     
     // Ensure output directory exists
     if (!fs.existsSync(OUTPUT_DIR)) {
       fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     }
     
-    // Save to file
+    // Save merged pages to file
     fs.writeFileSync(
       OUTPUT_FILE,
-      JSON.stringify(processedPages, null, 2),
+      JSON.stringify(allPages, null, 2),
       'utf-8'
     );
     
+    console.log(`💾 Merged and saved ${allPages.length} total pages (${existingPages.length} existing + ${processedNewPages.length} new)`);
+    
     // Calculate stats
-    const totalSections = processedPages.reduce((sum, page) => sum + page.sections.length, 0);
-    const totalTextLength = processedPages.reduce((sum, page) => 
+    const totalSections = allPages.reduce((sum, page) => sum + page.sections.length, 0);
+    const totalTextLength = allPages.reduce((sum, page) => 
       sum + page.sections.reduce((s, sec) => s + sec.text.length, 0), 0
     );
     
     console.log(`\n✅ Crawl complete!`);
-    console.log(`📄 Total pages crawled: ${processedPages.length}`);
+    console.log(`📄 Total pages in database: ${allPages.length}`);
+    console.log(`📄 New pages crawled this run: ${processedNewPages.length}`);
     console.log(`📑 Total sections: ${totalSections}`);
     console.log(`📊 Total text length: ${totalTextLength.toLocaleString()} characters`);
     console.log(`💾 Output saved to: ${OUTPUT_FILE}`);
+    if (!forceAll) {
+      console.log(`\n💡 Tip: Use 'npm run crawl -- --force' to re-crawl all URLs`);
+    }
     
   } catch (error) {
     console.error('❌ Error during crawl:', error);

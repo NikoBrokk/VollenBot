@@ -17,78 +17,11 @@ interface Source {
 }
 
 const INITIAL_CHIPS = [
-  'Aktiviteter',
-  'Hva skjer',
-  'Kontakt',
-  'Om Vollen'
+  'Arrangementer',
+  'Spisesteder',
+  'Kultur',
+  'Båt & Sjø'
 ];
-
-// Static responses for quick action buttons - returns immediately without API calls
-const QUICK_ACTION_RESPONSES: Record<string, { answer: string; sources: Source[] }> = {
-  'aktiviteter': {
-    answer: `Vollen tilbyr en rekke spennende aktiviteter for alle aldre! Her er noen av de populære:
-
-- **Håndballtrening** på Vollenhallen for barn i ulike aldersgrupper
-- **Utendørs trening** som bootcamp og lunsjtrening ved Vollen Fergekaia
-- **Båtsamling** i Vollen gjestehavn
-- **Barseltrening med baby** for nye mødre
-- **Gaming og e-sport** for barn (Onsdagsgaming)
-
-Vollen har også museum, galleri, badestrender og mange turmuligheter. Det er alltid noe å gjøre for både liten og stor!`,
-    sources: [{
-      url: 'https://vollenopplevelser.no',
-      title: 'Vollen opplevelser',
-      content: 'Vollen tilbyr en rekke tjenester som fanger essensen av stedets kultur og maritime sjel.'
-    }]
-  },
-  'hva skjer': {
-    answer: `På Vollen skjer det alltid noe! Du kan finne:
-
-- **Arrangementer og events** hele året
-- **Båtsamlinger** i gjestehavnen
-- **Trening og aktiviteter** på Vollenhallen og utendørs
-- **Kulturarrangement** som stolpejakt og andre lokale aktiviteter
-
-For å se hva som skjer akkurat nå, kan du sjekke "Aktuelt"-siden på vollenopplevelser.no. Der finner du oppdatert informasjon om kommende arrangementer og hendelser.`,
-    sources: [{
-      url: 'https://vollenopplevelser.no',
-      title: 'Hva skjer - Vollen',
-      content: 'Hva er på gang i Vollen i dag, i morgen eller neste helg? Her finnes det alltid noe å gjøre for både liten og stor.'
-    }]
-  },
-  'kontakt': {
-    answer: `Du kan kontakte Vollen Opplevelser på:
-
-**E-post:** opplevelser@askern.no
-
-**Adresse:** Vollenveien 13, 1390 Asker
-
-Har du forslag til arrangementer, tjenester, butikker eller andre tilbud? Vi vil gjerne høre fra deg!`,
-    sources: [{
-      url: 'https://vollenopplevelser.no/kontakt-oss',
-      title: 'Kontakt oss',
-      content: 'Vollenveien 13, 1390 Asker. Kontakt oss: opplevelser@askern.no'
-    }]
-  },
-  'om vollen': {
-    answer: `Vollen er et koselig og «passe stort» tettsted ved fjorden, cirka tre mil syd for Oslo.
-
-Her finner du:
-- **Butikker** (søndagsåpne)
-- **Spisesteder** med god mat
-- **Museum og galleri** for kulturinteresserte
-- **Båthavner** for maritime opplevelser
-- **Badestrender** for bading om sommeren
-- **Mange turmuligheter** i vakker natur
-
-Vollen er et levende kystsamfunn med stolte maritime tradisjoner, vakker natur og et mangfoldig næringsliv. Stedet byr på opplevelser hele året – for både fastboende og besøkende!`,
-    sources: [{
-      url: 'https://vollenopplevelser.no',
-      title: 'Om Vollen',
-      content: 'Vollen er et koselig og «passe stort» tettsted ved fjorden, cirka tre mil syd for Oslo. Her finner du butikker (søndagsåpne), spisesteder, museum, galleri, båthavner, badestrender, mange turmuligheter og aktivitetstilbud.'
-    }]
-  }
-};
 
 export default function Chatbot() {
   const [isOpen, setIsOpen] = useState(false);
@@ -164,7 +97,7 @@ export default function Chatbot() {
   const initializeBot = () => {
     const welcomeMessage: Message = {
       role: 'assistant',
-      content: 'Hei! 👋\n\nJeg er Gabrielsen AI, din digitale assistent for Vollen Opplevelser.\n\nHva kan jeg hjelpe deg med i dag?',
+      content: 'Hei! 👋\n\nJeg er Vollen Bot, din digitale assistent for Vollen Opplevelser.\n\nHva kan jeg hjelpe deg med i dag?',
     };
     setMessages([welcomeMessage]);
     setTimeout(() => {
@@ -253,30 +186,7 @@ export default function Chatbot() {
     // Add user message to UI
     addMessage(trimmedMessage, 'user');
 
-    // Check if this is a quick action button - return immediately without API call
-    const normalizedMessage = trimmedMessage.toLowerCase().trim();
-    const quickActionResponse = QUICK_ACTION_RESPONSES[normalizedMessage];
-    
-    if (quickActionResponse && conversationHistory.length === 0) {
-      // This is a quick action button - return immediately
-      console.log(`Quick action button clicked: "${trimmedMessage}" - returning static response immediately`);
-      
-      // Show thinking indicator briefly
-      setIsThinking(true);
-      
-      // Wait a tiny bit to show thinking indicator, then show answer
-      setTimeout(() => {
-        setIsThinking(false);
-        addMessage(quickActionResponse.answer, 'assistant', quickActionResponse.sources);
-        setIsLoading(false);
-        setTyping(false);
-        inputRef.current?.focus();
-      }, 100); // Very short delay to show thinking indicator
-      
-      return; // Exit early - no API call
-    }
-
-    // Show thinking indicator immediately for regular queries
+    // Show thinking indicator immediately
     setIsThinking(true);
     setIsLoading(true);
     setTyping(true);

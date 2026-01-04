@@ -10,6 +10,7 @@
     "embed": "tsx scripts/embed.ts",
     "test": "tsx scripts/test.ts",
     "test-rag": "tsx scripts/test-rag.ts",
+    "test-performance": "tsx scripts/performance-test.ts",
     "evaluate": "tsx scripts/evaluate-index.ts",
     "build": "next build",
     "dev": "next dev",
@@ -25,6 +26,7 @@
     "dotenv": "^16.4.5",
     "next": "^14.2.0",
     "openai": "^6.10.0",
+    "puppeteer": "^24.34.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-markdown": "^10.1.0"

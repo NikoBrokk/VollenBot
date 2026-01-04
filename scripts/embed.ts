@@ -76,6 +76,46 @@ async function createEmbeddings(texts: string[]): Promise<number[][]> {
 }
 
 /**
+ * Deletes all existing documents from Supabase
+ */
+async function deleteAllDocuments(): Promise<number> {
+  try {
+    // First, count existing documents
+    const { count, error: countError } = await supabase
+      .from('documents')
+      .select('*', { count: 'exact', head: true });
+    
+    if (countError) {
+      throw countError;
+    }
+    
+    const existingCount = count || 0;
+    
+    if (existingCount === 0) {
+      console.log('  ℹ️  No existing documents to delete');
+      return 0;
+    }
+    
+    // Delete all documents
+    // With service_role key, we can delete all rows by using a condition that matches all
+    // We use .neq('content', '') which should match all rows since content is always present
+    const { error: deleteError } = await supabase
+      .from('documents')
+      .delete()
+      .neq('content', ''); // Matches all rows since content is always a non-empty string
+    
+    if (deleteError) {
+      throw deleteError;
+    }
+    
+    return existingCount;
+  } catch (error) {
+    console.error('Error deleting existing documents:', error);
+    throw error;
+  }
+}
+
+/**
  * Inserts chunks into Supabase
  */
 async function insertChunks(chunks: DatabaseChunk[]): Promise<void> {
@@ -110,6 +150,20 @@ async function embed(): Promise<void> {
     if (chunks.length === 0) {
       console.log('⚠️  No chunks to process. Exiting.');
       return;
+    }
+    
+    // Delete all existing documents before inserting new ones
+    console.log('🗑️  Deleting existing documents from Supabase...');
+    try {
+      const deletedCount = await deleteAllDocuments();
+      if (deletedCount > 0) {
+        console.log(`  ✅ Deleted ${deletedCount} existing document(s)\n`);
+      } else {
+        console.log('  ✅ No existing documents found\n');
+      }
+    } catch (error) {
+      console.error('  ❌ Error deleting existing documents:', error);
+      throw error;
     }
     
     // Process chunks in batches

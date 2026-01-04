@@ -24,7 +24,7 @@ function getSupabaseClient() {
 
 const EMBEDDING_MODEL = 'text-embedding-3-small';
 const CHAT_MODEL = 'gpt-4o-mini';
-const MATCH_COUNT = 5; // Increased from 1 to get better context from multiple matches
+const MATCH_COUNT = 12; // Increased to get more diverse matches, especially for general queries like "aktiviteter"
 // Lowered threshold to allow more matches; we will still sort by similarity
 const MATCH_THRESHOLD = 0.25; // Lowered from 0.3 to catch more relevant matches
 
@@ -298,6 +298,252 @@ function trimHistory(
 }
 
 /**
+ * Expand short, general queries to include related terms for better embedding matching
+ * This helps with queries like "Spisesteder" -> "restauranter kafeer spisesteder matsteder"
+ */
+function expandQuery(query: string): string {
+  const lowerQuery = query.toLowerCase().trim();
+  
+  // Query expansion map for common general terms
+  const expansions: Record<string, string> = {
+    'spisesteder': 'restauranter kafeer spisesteder matsteder spise og drikke',
+    'spise': 'restauranter kafeer spisesteder matsteder spise og drikke',
+    'restaurant': 'restauranter kafeer spisesteder matsteder spise og drikke',
+    'kafe': 'kafeer restauranter spisesteder matsteder spise og drikke',
+    'mat': 'restauranter kafeer spisesteder matsteder spise og drikke',
+    'drikke': 'restauranter kafeer spisesteder matsteder spise og drikke',
+    'aktiviteter': 'aktiviteter trening arrangementer opplevelser events',
+    'aktivitet': 'aktiviteter trening arrangementer opplevelser events',
+    'overnatting': 'overnatting hotell b&b gjestehus overnattingssteder',
+    'overnatte': 'overnatting hotell b&b gjestehus overnattingssteder',
+    'parkering': 'parkering parkere parkeringsplass parkeringsplasser',
+    'parkere': 'parkering parkere parkeringsplass parkeringsplasser',
+    'butikker': 'butikker butikk shop shopping dagligvarer',
+    'butikk': 'butikker butikk shop shopping dagligvarer',
+    'transport': 'transport buss bil ferge hvordan komme til vollen',
+    'komme til': 'transport buss bil ferge hvordan komme til vollen',
+    'historie': 'historie historisk kultur museum tradisjon fortid',
+    'lokasjon': 'lokasjon ligger adresse plassering hvor er vollen',
+    'hvor ligger': 'lokasjon ligger adresse plassering hvor er vollen',
+  };
+  
+  // Check for exact match
+  if (expansions[lowerQuery]) {
+    return `${query} ${expansions[lowerQuery]}`;
+  }
+  
+  // Check if query contains any expansion terms
+  for (const [key, expansion] of Object.entries(expansions)) {
+    if (lowerQuery.includes(key)) {
+      return `${query} ${expansion}`;
+    }
+  }
+  
+  // No expansion needed
+  return query;
+}
+
+/**
+ * Extract key terms from a query for content matching
+ */
+function extractKeyTerms(query: string): string[] {
+  // Remove common stop words in Norwegian
+  const stopWords = new Set([
+    'hva', 'hvor', 'hvem', 'hvorfor', 'hvordan', 'når', 'hvilken', 'hvilke',
+    'er', 'var', 'ble', 'blir', 'har', 'hadde', 'vil', 'skal', 'kan', 'må',
+    'og', 'eller', 'men', 'for', 'på', 'av', 'til', 'med', 'om', 'i', 'å',
+    'en', 'et', 'den', 'det', 'de', 'som', 'seg', 'sin', 'sitt', 'sine',
+    'jeg', 'du', 'han', 'hun', 'vi', 'dere', 'de', 'meg', 'deg', 'ham', 'henne',
+    'oss', 'dere', 'dem', 'min', 'din', 'hans', 'hennes', 'vår', 'deres',
+    'vollen', 'opplevelser', 'opplevelser.no', 'vollenopplevelser.no'
+  ]);
+  
+  // Extract words (Norwegian characters included)
+  const words = query.toLowerCase()
+    .replace(/[^\wæøåÆØÅ\s]/g, ' ')
+    .split(/\s+/)
+    .filter(word => word.length > 2 && !stopWords.has(word));
+  
+  return [...new Set(words)]; // Remove duplicates
+}
+
+/**
+ * Calculate content relevance score between query and a source
+ * Returns a score from 0-1 indicating how well the source matches the query
+ */
+function calculateContentRelevance(
+  query: string,
+  sourceUrl: string,
+  sourceTitle: string | null,
+  sourceContent: string
+): number {
+  const keyTerms = extractKeyTerms(query);
+  if (keyTerms.length === 0) return 0.5; // Neutral score if no key terms
+  
+  const urlLower = sourceUrl.toLowerCase();
+  const titleLower = (sourceTitle || '').toLowerCase();
+  const contentLower = sourceContent.toLowerCase();
+  
+  let relevanceScore = 0;
+  let matches = 0;
+  
+  // Check URL match (high weight)
+  for (const term of keyTerms) {
+    if (urlLower.includes(term)) {
+      relevanceScore += 0.3;
+      matches++;
+    }
+  }
+  
+  // Check title match (high weight)
+  for (const term of keyTerms) {
+    if (titleLower.includes(term)) {
+      relevanceScore += 0.3;
+      matches++;
+    }
+  }
+  
+  // Check content match (medium weight, but count occurrences)
+  let contentMatches = 0;
+  for (const term of keyTerms) {
+    const regex = new RegExp(term, 'gi');
+    const occurrences = (contentLower.match(regex) || []).length;
+    if (occurrences > 0) {
+      contentMatches += Math.min(occurrences, 3); // Cap at 3 per term
+      matches++;
+    }
+  }
+  relevanceScore += (contentMatches / keyTerms.length) * 0.2;
+  
+  // Normalize by number of key terms
+  if (matches > 0) {
+    return Math.min(1.0, relevanceScore);
+  }
+  
+  return 0;
+}
+
+/**
+ * Find the most relevant source based on actual content matching
+ * This prioritizes sources that actually contain information related to the query
+ */
+function findMostRelevantSource(
+  query: string,
+  selectedMatches: any[],
+  homepageUrls: string[]
+): Source | null {
+  if (selectedMatches.length === 0) return null;
+  
+  interface SourceCandidate {
+    url: string;
+    title: string | null;
+    content: string;
+    relevanceScore: number;
+    similarityScore: number;
+    chunkCount: number;
+  }
+  
+  // Group by URL and calculate aggregated metrics
+  const sourceMap = new Map<string, SourceCandidate>();
+  
+  for (const match of selectedMatches) {
+    const url = match.source_url || '';
+    if (!url) continue;
+    
+    const relevance = calculateContentRelevance(
+      query,
+      url,
+      match.title || null,
+      match.content || ''
+    );
+    
+    if (!sourceMap.has(url)) {
+      sourceMap.set(url, {
+        url: url,
+        title: match.title || null,
+        content: match.content || '',
+        relevanceScore: relevance,
+        similarityScore: match.similarity || 0,
+        chunkCount: 1,
+      });
+    } else {
+      const existing = sourceMap.get(url)!;
+      // Update with best content (longest, most comprehensive)
+      if ((match.content || '').length > existing.content.length) {
+        existing.content = match.content || '';
+        existing.title = match.title || null;
+      }
+      // Average relevance (or use max?)
+      existing.relevanceScore = Math.max(existing.relevanceScore, relevance);
+      existing.similarityScore = Math.max(existing.similarityScore, match.similarity || 0);
+      existing.chunkCount += 1;
+    }
+  }
+  
+  // Separate homepage and specific pages
+  const homepageSources: SourceCandidate[] = [];
+  const specificSources: SourceCandidate[] = [];
+  
+  for (const candidate of sourceMap.values()) {
+    if (homepageUrls.includes(candidate.url)) {
+      homepageSources.push(candidate);
+    } else {
+      specificSources.push(candidate);
+    }
+  }
+  
+  // Sort by relevance score (content match), then similarity, then chunk count
+  const sortByRelevance = (a: SourceCandidate, b: SourceCandidate) => {
+    // Primary: content relevance (how well it matches the query)
+    if (Math.abs(b.relevanceScore - a.relevanceScore) > 0.1) {
+      return b.relevanceScore - a.relevanceScore;
+    }
+    // Secondary: similarity score
+    if (Math.abs(b.similarityScore - a.similarityScore) > 0.05) {
+      return b.similarityScore - a.similarityScore;
+    }
+    // Tertiary: chunk count (more chunks = more content used)
+    return b.chunkCount - a.chunkCount;
+  };
+  
+  // Prioritize specific pages over homepage
+  if (specificSources.length > 0) {
+    specificSources.sort(sortByRelevance);
+    const best = specificSources[0];
+    console.log(`Selected specific source: ${best.url} (relevance: ${best.relevanceScore.toFixed(3)}, similarity: ${best.similarityScore.toFixed(3)}, chunks: ${best.chunkCount})`);
+    return {
+      url: best.url,
+      title: best.title,
+      content: best.content,
+    };
+  }
+  
+  // Fallback to homepage if no specific pages
+  if (homepageSources.length > 0) {
+    homepageSources.sort(sortByRelevance);
+    const best = homepageSources[0];
+    console.log(`Selected homepage source: ${best.url} (relevance: ${best.relevanceScore.toFixed(3)}, similarity: ${best.similarityScore.toFixed(3)}, chunks: ${best.chunkCount})`);
+    return {
+      url: best.url,
+      title: best.title,
+      content: best.content,
+    };
+  }
+  
+  // Final fallback
+  if (selectedMatches.length > 0) {
+    const first = selectedMatches[0];
+    return {
+      url: first.source_url || '',
+      title: first.title || null,
+      content: first.content || '',
+    };
+  }
+  
+  return null;
+}
+
+/**
  * Build context from matches with token management
  * Prioritizes chunks by similarity score and ensures we stay within token limits
  */
@@ -430,9 +676,9 @@ export async function POST(request: NextRequest) {
                 await new Promise(resolve => setTimeout(resolve, 5));
               }
               
-              // Send sources
-              const sourcesData = JSON.stringify({ type: 'sources', data: cached.sources });
-              controller.enqueue(encoder.encode(`data: ${sourcesData}\n\n`));
+              // Send sources (DISABLED - source selection not accurate enough yet)
+              // const sourcesData = JSON.stringify({ type: 'sources', data: cached.sources });
+              // controller.enqueue(encoder.encode(`data: ${sourcesData}\n\n`));
               
               // Send done signal
               controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
@@ -453,22 +699,41 @@ export async function POST(request: NextRequest) {
             'X-RateLimit-Limit': RATE_LIMIT_REQUESTS.toString(),
             'X-RateLimit-Remaining': rateLimit.remaining.toString(),
             'X-RateLimit-Reset': new Date(rateLimit.resetAt).toISOString(),
+            'X-Performance-Embedding': '0',
+            'X-Performance-Supabase': '0',
+            'X-Performance-Chat': '0',
+            'X-Performance-TTFB': '0',
           },
         });
       }
     }
 
-    // 1. Create embedding for the user's message
+    // Performance timing
+    const perfStart = Date.now();
+    let embeddingTime = 0;
+    let supabaseTime = 0;
+    let chatTime = 0;
+
+    // 1. Expand query for better matching (especially for short, general queries)
+    const expandedQuery = expandQuery(message);
+    console.log(`Original query: "${message}"`);
+    console.log(`Expanded query: "${expandedQuery}"`);
+    
+    // 2. Create embedding for the expanded query
     console.log('Creating embedding for message...');
+    const embeddingStart = Date.now();
     const embeddingResponse = await openai.embeddings.create({
       model: EMBEDDING_MODEL,
-      input: message,
+      input: expandedQuery,
     });
+    embeddingTime = Date.now() - embeddingStart;
+    console.log(`Embedding time: ${embeddingTime}ms`);
 
     const queryEmbedding = embeddingResponse.data[0].embedding;
 
-    // 2. Call Supabase RPC: match_documents
+    // 3. Call Supabase RPC: match_documents
     console.log('Calling match_documents RPC...');
+    const supabaseStart = Date.now();
     const { data: matches, error: rpcError } = await supabase.rpc(
       'match_documents',
       {
@@ -477,6 +742,8 @@ export async function POST(request: NextRequest) {
         match_threshold: MATCH_THRESHOLD,
       }
     );
+    supabaseTime = Date.now() - supabaseStart;
+    console.log(`Supabase time: ${supabaseTime}ms`);
 
     if (rpcError) {
       console.error('RPC Error:', rpcError);
@@ -486,7 +753,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Debug: Log matches found
+    console.log(`\n🔍 Query: "${message}"`);
+    console.log(`📊 Matches from database: ${matches?.length || 0}`);
+    if (matches && matches.length > 0) {
+      console.log(`   Top match similarity: ${matches[0]?.similarity?.toFixed(4)}`);
+      console.log(`   Top match preview: ${matches[0]?.content?.substring(0, 150)}...`);
+      console.log(`   All similarities: ${matches.map((m: any) => m.similarity?.toFixed(3)).join(', ')}`);
+    }
+
     if (!matches || matches.length === 0) {
+      console.warn(`⚠️  No matches found for query: "${message}"`);
       return NextResponse.json({
         answer: 'Beklager, jeg fant ingen relevant informasjon i databasen for å svare på spørsmålet ditt.',
         sources: [],
@@ -501,16 +778,64 @@ export async function POST(request: NextRequest) {
     );
 
     // 4. Build context string from chunks with token management
-    const systemPrompt = `Du er en hyggelig, jovial, hjelpsom og lokalkjent assistent for Vollen Opplevelser.
+    const systemPrompt = `DU ER: Vollen Bot – en hjelpsom, lokalkjent guide for Vollen. Du svarer på norsk, vennlig og lokalt, men kompakt.
 
-REGLER:
-- Svar basert på informasjonen i konteksten nedenfor (nummererte utdrag fra Vollen Opplevelser sitt innhold)
-- Vær informerende, ikke selgende, men positiv og oppmuntrende
-- Norsk, vennlig tone, maks 4-5 linjer (kan utvide med punktliste hvis nødvendig)
-- Bruk markdown for punktlister og fet tekst der det hjelper
-- Ikke hallusiner: Hvis informasjonen mangler i konteksten, si tydelig at du ikke vet
-- Kun hvis informasjonen mangler: "Kontakt Vollen Opplevelser på opplevelser@askern.no"
-- Husk informasjon fra tidligere meldinger i samtalen når det er relevant`;
+KONTEKST:
+Du får utdrag fra Vollen Opplevelser og arrangementer fra «Hva skjer i Asker». Bruk kun denne konteksten som fakta.
+
+HOVEDJOBB:
+Hjelp brukeren å finne spesifikke:
+
+* Arrangementer og hva som skjer
+* Spisesteder og butikker
+* Turtips og opplevelser
+* Båt, transport og praktisk info
+  Gi konkrete forslag fra konteksten med navn, sted og tidspunkt.
+  ALLTID bruk spesifikke navn, alltid vær så presis som mulig. 
+
+SVARSTIL:
+* Maks 3–6 linjer før evt punktliste.
+* Bruk punktliste når du nevner flere ting. 
+* Bruk alltid spesifikke navn på bedrifter
+* Bruk fet skrift for navn/steder/tider når det hjelper.
+* Skriv som en lokalkjent person, men ikke overdriv.
+* Vær jovial og vennlig, spesielt i starten av svaret, men med utgangspunkt i spørsmålet
+
+REGLER FOR FAKTA OG USIKKERHET:
+
+* Ikke finn på detaljer (dato, tid, pris, adresse, åpningstider, regler).
+* Hvis konteksten har svar: gi det presist og konkret.
+* Hvis konteksten er delvis relevant: gi det du faktisk vet + si hva som mangler (kort).
+* Hvis du ikke har info om akkurat det brukeren spør om:
+
+  1. Gi et nært alternativ fra konteksten (hvis relevant)
+  2. Still 1 kort oppfølgingsspørsmål for å spisse (maks ett)
+* Hvis du har null relevant info: si kort “Jeg finner ikke info om det i databasen min” og spør hva de mener (1 spørsmål).
+
+OPPFØLGINGSSPØRSMÅL:
+Still bare oppfølgingsspørsmål når det øker treffsikkerhet, f.eks:
+
+* “Når tenker du – i dag eller i helgen?”
+* “Vil du ha noe familievennlig eller mer kveldsstemning?”
+* “Tenker du mat, tur eller arrangement?”
+
+HÅNDTER GENERELLE SPØRSMÅL SLIK:
+Hvis brukeren spør “Hva skjer i Vollen?” eller “Hva kan man gjøre?”:
+
+* Gi 3–5 konkrete eksempler fra konteksten (arrangementer/steder)
+* Prioriter det som er mest tidsnært eller tydelig beskrevet
+* Avslutt med ett kort valgspørsmål (type opplevelse eller tidspunkt)
+
+FORMATMAL (bruk når relevant):
+**Kort oppsummering**
+
+* punkt
+* punkt
+* punkt
+* punkt
+* punkt
+  <ett kort spørsmål>
+`;
 
     const { context, selectedMatches, totalTokens } = buildContextWithTokenManagement(
       matches,
@@ -521,13 +846,27 @@ REGLER:
 
     // Log token usage for monitoring
     console.log(`Token usage: ${totalTokens}/${MAX_CONTEXT_TOKENS} tokens, ${selectedMatches.length}/${matches.length} chunks selected, ${trimmedHistory.length}/${history.length} history messages`);
+    
+    // Debug: Check if context is empty
+    if (selectedMatches.length === 0) {
+      console.error(`❌ ERROR: No chunks selected for context! Total matches: ${matches.length}`);
+      console.error(`   This means context will be empty and LLM won't have any information to work with.`);
+    } else {
+      console.log(`✅ Context built with ${selectedMatches.length} chunks`);
+      console.log(`   Context preview (first 300 chars): ${context.substring(0, 300)}...`);
+    }
 
-    // 5. Prepare sources for response (use only the first selected match)
-    const sources: Source[] = selectedMatches.slice(0, 1).map((match: any) => ({
-      url: match.source_url || '',
-      title: match.title || null,
-      content: match.content || '',
-    }));
+    // 5. Prepare sources for response
+    // Strategy: Find the source that best matches the actual content of the query
+    // This analyzes which source actually contains information related to what was asked
+    const homepageUrls = ['https://vollenopplevelser.no', 'https://vollenopplevelser.no/'];
+    
+    const bestSource = findMostRelevantSource(message, selectedMatches, homepageUrls);
+    
+    const sources: Source[] = [];
+    if (bestSource) {
+      sources.push(bestSource);
+    }
 
     // 5. Build messages array with history, context, and current query
     const messagesForOpenAI = [
@@ -547,16 +886,19 @@ REGLER:
     // 6. Call OpenAI Chat API with streaming
     console.log('Calling OpenAI Chat API with streaming...');
     console.log(`Including ${trimmedHistory.length} history messages in context`);
+    const chatStart = Date.now();
     const chatStream = await openai.chat.completions.create({
       model: CHAT_MODEL,
       messages: messagesForOpenAI,
-      temperature: 0.7,
+      temperature: 0.3, // Lowered from 0.7 for more precise, focused responses and better query understanding
       max_tokens: 1000,
       stream: true, // Enable streaming
     });
+    // Note: chatTime will be measured when first token arrives in streaming
 
     // 6. Create streaming response
     const encoder = new TextEncoder();
+    let firstTokenSent = false;
     const stream = new ReadableStream({
       async start(controller) {
         try {
@@ -564,15 +906,28 @@ REGLER:
           for await (const chunk of chatStream) {
             const content = chunk.choices[0]?.delta?.content;
             if (content) {
+              // Measure chat time on first token
+              if (!firstTokenSent) {
+                chatTime = Date.now() - chatStart;
+                firstTokenSent = true;
+                console.log(`Chat TTFB: ${chatTime}ms`);
+              }
+              
               // Send token as Server-Sent Event
               const data = JSON.stringify({ type: 'token', data: content });
               controller.enqueue(encoder.encode(`data: ${data}\n\n`));
             }
           }
+          
+          // If no tokens were sent, measure chat time now
+          if (!firstTokenSent) {
+            chatTime = Date.now() - chatStart;
+            console.log(`Chat time (no tokens): ${chatTime}ms`);
+          }
 
-          // Send sources after streaming is complete
-          const sourcesData = JSON.stringify({ type: 'sources', data: sources });
-          controller.enqueue(encoder.encode(`data: ${sourcesData}\n\n`));
+          // Send sources after streaming is complete (DISABLED - source selection not accurate enough yet)
+          // const sourcesData = JSON.stringify({ type: 'sources', data: sources });
+          // controller.enqueue(encoder.encode(`data: ${sourcesData}\n\n`));
 
           // Send done signal
           controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
@@ -589,6 +944,9 @@ REGLER:
       },
     });
 
+    // Calculate total time before first token (TTFB)
+    const totalTTFB = embeddingTime + supabaseTime + chatTime;
+    
     return new NextResponse(stream, {
       headers: {
         'Content-Type': 'text/event-stream',
@@ -597,6 +955,10 @@ REGLER:
         'X-RateLimit-Limit': RATE_LIMIT_REQUESTS.toString(),
         'X-RateLimit-Remaining': rateLimit.remaining.toString(),
         'X-RateLimit-Reset': new Date(rateLimit.resetAt).toISOString(),
+        'X-Performance-Embedding': embeddingTime.toString(),
+        'X-Performance-Supabase': supabaseTime.toString(),
+        'X-Performance-Chat': chatTime.toString(),
+        'X-Performance-TTFB': totalTTFB.toString(),
       },
     });
   } catch (error) {

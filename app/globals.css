@@ -29,16 +29,26 @@
 }
 
 /* Typography */
+html {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
 body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
   color: rgb(var(--foreground-rgb));
-  background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
-    rgb(var(--background-start-rgb));
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  width: 100%;
+  background-image: url('/assets/mvp.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
 }
 
 /* Animations */
@@ -151,6 +161,7 @@ body {
   animation: slideInUp 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
   clip: auto;
   clip-path: none;
+  overflow: hidden;
 }
 
 /* Close Button */
