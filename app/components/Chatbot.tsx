@@ -32,11 +32,20 @@ export default function Chatbot() {
   const [showChips, setShowChips] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
   const [input, setInput] = useState('');
+  const [chipCache, setChipCache] = useState<Map<string, { answer: string }>>(new Map());
+  const [chipCacheLoaded, setChipCacheLoaded] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Load chip cache when component mounts (once)
+  useEffect(() => {
+    if (!chipCacheLoaded) {
+      loadChipCache();
+    }
+  }, [chipCacheLoaded]);
 
   // Initialize bot on first open
   useEffect(() => {
@@ -93,6 +102,30 @@ export default function Chatbot() {
       };
     }
   }, [isOpen]);
+
+  const loadChipCache = async () => {
+    try {
+      const response = await fetch('/chip-cache.json');
+      if (response.ok) {
+        const data = await response.json();
+        const cacheMap = new Map<string, { answer: string }>();
+        for (const [key, value] of Object.entries(data)) {
+          const entry = value as { answer: string };
+          cacheMap.set(key, {
+            answer: entry.answer,
+          });
+        }
+        setChipCache(cacheMap);
+        console.log(`✅ Loaded chip cache for ${cacheMap.size} chips`);
+      } else {
+        console.log('ℹ️  No chip cache found, chips will use normal API flow');
+      }
+    } catch (error) {
+      console.log('ℹ️  Could not load chip cache, chips will use normal API flow:', error);
+    } finally {
+      setChipCacheLoaded(true);
+    }
+  };
 
   const initializeBot = () => {
     const welcomeMessage: Message = {
@@ -363,8 +396,80 @@ export default function Chatbot() {
     }
   };
 
-  const handleChipClick = (chipText: string) => {
+  /**
+   * Stream cached response with typewriter effect to make it feel more natural
+   */
+  const streamCachedResponse = async (text: string) => {
+    // Show thinking indicator
+    setIsThinking(true);
+    
+    // Create initial empty assistant message
+    const assistantMessage: Message = {
+      role: 'assistant',
+      content: '',
+      sources: [],
+    };
+    setMessages((prev) => [...prev, assistantMessage]);
+    
+    // Hide thinking indicator after short delay (simulates "thinking")
+    setTimeout(() => {
+      setIsThinking(false);
+    }, 300);
+    
+    // Stream text with natural typing speed
+    // Using word-based streaming for more natural feel (words instead of characters)
+    const words = text.split(/(\s+)/); // Split preserving whitespace
+    let displayedText = '';
+    
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      displayedText += word;
+      
+      // Update message content by finding the last assistant message
+      setMessages((prev) => {
+        const updated = [...prev];
+        // Find the last assistant message (the one we just added)
+        for (let j = updated.length - 1; j >= 0; j--) {
+          if (updated[j].role === 'assistant' && updated[j].content.length < text.length) {
+            updated[j] = {
+              ...updated[j],
+              content: displayedText,
+            };
+            break;
+          }
+        }
+        return updated;
+      });
+      
+      // Calculate delay: faster for spaces, variable for words based on length
+      // Adjust these values to control typing speed (lower = faster)
+      const delay = word.trim().length === 0 
+        ? 10  // Spaces/punctuation are fast
+        : 15 + (word.trim().length * 2); // 15-50ms per word depending on length
+      
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    
+    // Small final delay to complete the animation
+    await new Promise(resolve => setTimeout(resolve, 100));
+  };
+
+  const handleChipClick = async (chipText: string) => {
     setInput('');
+    
+    // Check if we have cached response for this chip
+    if (chipCache.has(chipText)) {
+      const cached = chipCache.get(chipText)!;
+      // Add user message
+      addMessage(chipText, 'user');
+      // Hide chips after clicking
+      setShowChips(false);
+      // Stream cached response with typewriter effect
+      await streamCachedResponse(cached.answer);
+      return;
+    }
+    
+    // Fallback to normal API flow if no cache
     sendMessage(chipText);
   };
 
