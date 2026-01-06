@@ -1,12 +1,13 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import { botConfig } from '@/config/bot-config'
 
 export const metadata: Metadata = {
-  title: 'Vollen Bot - RAG Chat',
-  description: 'Chat med Vollen Opplevelser ved hjelp av RAG',
+  title: botConfig.metadata.title,
+  description: botConfig.metadata.description,
   icons: {
-    icon: '/assets/logo.png',
-    apple: '/assets/logo.png',
+    icon: botConfig.metadata.icon || '/assets/logo.png',
+    apple: botConfig.metadata.icon || '/assets/logo.png',
   },
 }
 
@@ -16,7 +17,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="no">
+    <html lang={botConfig.language}>
       <body>{children}</body>
     </html>
   )

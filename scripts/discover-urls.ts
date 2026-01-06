@@ -4,14 +4,15 @@ import * as path from 'path';
 import * as dotenv from 'dotenv';
 import * as https from 'https';
 import * as http from 'http';
+import { botConfig } from '../config/bot-config';
 
 // Load environment variables
 dotenv.config();
 
 const API_KEY = process.env.FIRECRAWL_API_KEY;
-const START_URL = 'https://vollenopplevelser.no';
-const RELATED_DOMAIN = 'https://hvaskjeriasker.no'; // Related domain for events/arrangements
-const ALLOWED_DOMAINS = [START_URL, RELATED_DOMAIN];
+const START_URL = botConfig.startUrl;
+const RELATED_DOMAINS = botConfig.relatedDomains || [];
+const ALLOWED_DOMAINS = [START_URL, ...RELATED_DOMAINS];
 const OUTPUT_DIR = path.join(process.cwd(), 'data', 'raw');
 const URLS_FILE = path.join(OUTPUT_DIR, 'discovered_urls.json');
 
@@ -188,8 +189,15 @@ async function discoverFromMapUrl(baseUrl: string = START_URL): Promise<string[]
  */
 function normalizeUrl(url: string): string {
   let normalized = url.replace(/\/$/, ''); // Remove trailing slash
-  // Convert www.hvaskjeriasker.no to hvaskjeriasker.no for canonical form
-  normalized = normalized.replace(/^https?:\/\/www\.hvaskjeriasker\.no/, 'https://hvaskjeriasker.no');
+  // Convert www to non-www for canonical form (generic)
+  for (const domain of ALLOWED_DOMAINS) {
+    const domainWithoutProtocol = domain.replace(/^https?:\/\//, '');
+    const wwwDomain = domain.replace(/^https?:\/\//, 'www.');
+    normalized = normalized.replace(
+      new RegExp(`^https?://www\\.${domainWithoutProtocol.replace(/\./g, '\\.')}`, 'i'),
+      domain
+    );
+  }
   return normalized;
 }
 
@@ -229,19 +237,20 @@ async function discoverLinksFromPage(pageUrl: string, options: {
 }
 
 /**
- * Check if URL is a valid hvaskjeriasker.no event URL
+ * Check if URL is a valid related domain URL
+ * This is a generic function that can be customized based on botConfig.relatedDomains
  */
-function isValidAskerEventUrl(url: string): boolean {
+function isValidRelatedDomainUrl(url: string): boolean {
   const urlLower = url.toLowerCase();
   const normalized = normalizeUrl(urlLower);
   
-  // Must be from hvaskjeriasker.no
-  if (!normalized.includes('hvaskjeriasker.no')) {
-    return false;
-  }
+  // Check if URL is from any related domain
+  const isFromRelatedDomain = RELATED_DOMAINS.some(domain => {
+    const domainNormalized = normalizeUrl(domain.toLowerCase());
+    return normalized.includes(domainNormalized.replace(/^https?:\/\//, ''));
+  });
   
-  // Must contain /arrangorer/ path
-  if (!normalized.includes('/arrangorer/')) {
+  if (!isFromRelatedDomain) {
     return false;
   }
   
@@ -260,29 +269,30 @@ function isValidAskerEventUrl(url: string): boolean {
  */
 function isAllowedDomain(url: string): boolean {
   const normalized = normalizeUrl(url);
-  // Allow vollenopplevelser.no
-  if (normalized.startsWith(START_URL)) {
+  // Allow start URL
+  if (normalized.startsWith(normalizeUrl(START_URL))) {
     return true;
   }
-  // Allow hvaskjeriasker.no but only event URLs
-  if (normalized.includes('hvaskjeriasker.no')) {
-    return isValidAskerEventUrl(url);
+  // Allow related domains but only valid URLs
+  if (RELATED_DOMAINS.length > 0) {
+    return isValidRelatedDomainUrl(url);
   }
   return false;
 }
 
 /**
- * Discover event URLs from Hva skjer page with pagination and filters
+ * Discover event URLs from related domain pages with pagination and filters
+ * This is a generic function that works with any related domain
  */
-async function discoverHvaSkjerEventUrls(baseHvaSkjerUrl: string): Promise<Set<string>> {
+async function discoverRelatedDomainUrls(baseUrl: string): Promise<Set<string>> {
   const eventUrls = new Set<string>();
   const canonicalUrls = new Set<string>(); // For deduplication
   
-  console.log(`\n  📅 Discovering event URLs from ${baseHvaSkjerUrl}...`);
+  console.log(`\n  📅 Discovering URLs from ${baseUrl}...`);
   
   // Normalize base URL (remove trailing slash, preserve query/hash if any)
-  const baseUrl = normalizeUrl(baseHvaSkjerUrl.split('?')[0].split('#')[0]);
-  const baseUrlObj = new URL(baseHvaSkjerUrl);
+  const normalizedBaseUrl = normalizeUrl(baseUrl.split('?')[0].split('#')[0]);
+  const baseUrlObj = new URL(baseUrl);
   
   // Try different filter options - build URLs with query params
   const filterOptions = [
@@ -315,8 +325,8 @@ async function discoverHvaSkjerEventUrls(baseHvaSkjerUrl: string): Promise<Set<s
         waitFor: 4000, // Wait for JS rendering and cookie banner
       });
       
-      // Filter for hvaskjeriasker.no event URLs
-      const eventLinks = links.filter(url => isValidAskerEventUrl(url));
+      // Filter for related domain URLs
+      const eventLinks = links.filter(url => isValidRelatedDomainUrl(url));
       
       // Add new unique URLs
       let newUrlsCount = 0;
@@ -371,34 +381,42 @@ async function discoverHvaSkjerEventUrls(baseHvaSkjerUrl: string): Promise<Set<s
  */
 async function discoverAllUrls(): Promise<void> {
   try {
-    console.log('🔍 Discovering ALL URLs on vollenopplevelser.no and related domains...\n');
+    console.log(`🔍 Discovering ALL URLs on ${START_URL}${RELATED_DOMAINS.length > 0 ? ' and related domains' : ''}...\n`);
     console.log('='.repeat(70));
     
     const allUrls = new Set<string>();
     
-    // Strategy 1: Try sitemap first (most reliable and complete) - ONLY for vollenopplevelser.no
-    console.log('\n1️⃣ Strategy 1: Checking sitemap for vollenopplevelser.no...');
+    // Strategy 1: Try sitemap first (most reliable and complete) - for start URL
+    console.log(`\n1️⃣ Strategy 1: Checking sitemap for ${START_URL}...`);
     const sitemapUrls = await discoverFromSitemap(START_URL);
     sitemapUrls.forEach(url => allUrls.add(url));
     console.log(`   Total from sitemap: ${sitemapUrls.length}`);
     
-    // Strategy 2: Use Firecrawl mapUrl - ONLY for vollenopplevelser.no
-    console.log('\n2️⃣ Strategy 2: Using Firecrawl mapUrl for vollenopplevelser.no...');
+    // Strategy 2: Use Firecrawl mapUrl - for start URL
+    console.log(`\n2️⃣ Strategy 2: Using Firecrawl mapUrl for ${START_URL}...`);
     const mapUrls = await discoverFromMapUrl(START_URL);
     mapUrls.forEach(url => allUrls.add(url));
     console.log(`   Total from mapUrl: ${mapUrls.length}`);
     
-    // Strategy 3: Discover event URLs from Hva skjer section with pagination and filters
-    // This is the ONLY way we should discover hvaskjeriasker.no URLs
-    console.log('\n3️⃣ Strategy 3: Discovering event URLs from Hva skjer section...');
-    
-    // Use base URL (normalization will handle trailing slash)
-    const hvaSkjerUrl = `${START_URL}/hva-skjer`;
-    const eventUrls = await discoverHvaSkjerEventUrls(hvaSkjerUrl);
-    
-    // Add all event URLs to the main set
-    eventUrls.forEach(url => allUrls.add(url));
-    console.log(`\n   ✅ Total unique event URLs found: ${eventUrls.size}`);
+    // Strategy 3: Discover URLs from related domains (if configured)
+    if (RELATED_DOMAINS.length > 0) {
+      console.log('\n3️⃣ Strategy 3: Discovering URLs from related domains...');
+      
+      // Try to discover from related domains
+      // This is a generic approach - customize based on your needs
+      for (const relatedDomain of RELATED_DOMAINS) {
+        console.log(`   Discovering from ${relatedDomain}...`);
+        // You can customize this to discover specific pages from related domains
+        // For now, we'll use the discoverLinksFromPage function
+        const relatedUrls = await discoverLinksFromPage(relatedDomain, {
+          waitFor: 4000,
+        });
+        
+        const validRelatedUrls = relatedUrls.filter(url => isValidRelatedDomainUrl(url));
+        validRelatedUrls.forEach(url => allUrls.add(url));
+        console.log(`   ✅ Found ${validRelatedUrls.length} URLs from ${relatedDomain}`);
+      }
+    }
     
     // Combine and filter
     const combinedUrls = Array.from(allUrls);
@@ -411,13 +429,13 @@ async function discoverAllUrls(): Promise<void> {
       .filter(url => !shouldExcludeUrl(url))
       .filter(url => {
         const normalized = normalizeUrl(url);
-        // Allow all vollenopplevelser.no URLs
-        if (normalized.startsWith(START_URL)) {
+        // Allow all start URL
+        if (normalized.startsWith(normalizeUrl(START_URL))) {
           return true;
         }
-        // Only allow hvaskjeriasker.no event URLs (already filtered in Strategy 3)
-        if (normalized.includes('hvaskjeriasker.no')) {
-          return isValidAskerEventUrl(url);
+        // Only allow valid related domain URLs
+        if (RELATED_DOMAINS.length > 0) {
+          return isValidRelatedDomainUrl(url);
         }
         return false;
       })
@@ -474,36 +492,44 @@ async function discoverAllUrls(): Promise<void> {
       .sort();
     
     // Statistics
-    const vollenUrls = finalUrls.filter(url => normalizeUrl(url).startsWith(START_URL));
-    const askerUrls = finalUrls.filter(url => normalizeUrl(url).includes('hvaskjeriasker.no'));
+    const startUrls = finalUrls.filter(url => normalizeUrl(url).startsWith(normalizeUrl(START_URL)));
+    const relatedUrls = RELATED_DOMAINS.length > 0 
+      ? finalUrls.filter(url => {
+          return RELATED_DOMAINS.some(domain => 
+            normalizeUrl(url).includes(normalizeUrl(domain).replace(/^https?:\/\//, ''))
+          );
+        })
+      : [];
     
     console.log('\n📊 Discovery Summary:');
     console.log('='.repeat(70));
     console.log(`   Total unique URLs found: ${combinedUrls.length}`);
     console.log(`   After filtering: ${finalUrls.length}`);
-    console.log(`   From vollenopplevelser.no: ${vollenUrls.length}`);
-    console.log(`   From hvaskjeriasker.no (event URLs): ${askerUrls.length}`);
+    console.log(`   From ${START_URL}: ${startUrls.length}`);
+    if (RELATED_DOMAINS.length > 0) {
+      console.log(`   From related domains: ${relatedUrls.length}`);
+    }
     console.log(`   Excluded: ${combinedUrls.length - finalUrls.length}`);
     
-    // Show sample event URLs
-    if (askerUrls.length > 0) {
-      console.log(`\n📋 Sample event URLs (first 5):`);
-      askerUrls.slice(0, 5).forEach((url, idx) => {
+    // Show sample related domain URLs
+    if (relatedUrls.length > 0) {
+      console.log(`\n📋 Sample related domain URLs (first 5):`);
+      relatedUrls.slice(0, 5).forEach((url, idx) => {
         console.log(`   ${idx + 1}. ${url}`);
       });
-      if (askerUrls.length > 5) {
-        console.log(`   ... and ${askerUrls.length - 5} more event URLs`);
+      if (relatedUrls.length > 5) {
+        console.log(`   ... and ${relatedUrls.length - 5} more URLs`);
       }
     }
     
-    // Show some examples of vollen URLs
-    if (vollenUrls.length > 0) {
-      console.log(`\n📋 Sample vollenopplevelser.no URLs (first 5):`);
-      vollenUrls.slice(0, 5).forEach((url, idx) => {
+    // Show some examples of start URL
+    if (startUrls.length > 0) {
+      console.log(`\n📋 Sample ${START_URL} URLs (first 5):`);
+      startUrls.slice(0, 5).forEach((url, idx) => {
         console.log(`   ${idx + 1}. ${url}`);
       });
-      if (vollenUrls.length > 5) {
-        console.log(`   ... and ${vollenUrls.length - 5} more URLs`);
+      if (startUrls.length > 5) {
+        console.log(`   ... and ${startUrls.length - 5} more URLs`);
       }
     }
     

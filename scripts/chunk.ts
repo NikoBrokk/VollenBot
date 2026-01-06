@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { cwd } from 'process';
 import * as process from 'process';
+import { botConfig } from '../config/bot-config';
 
 interface Section {
   section_title: string;
@@ -24,9 +25,9 @@ interface Chunk {
 }
 
 // Input/output files
-const INPUT_FILE = path.join(cwd(), 'data', 'raw', 'firecrawl_vollen.json');
+const INPUT_FILE = path.join(cwd(), 'data', 'raw', 'firecrawl_data.json');
 const OUTPUT_DIR = path.join(cwd(), 'data', 'chunks');
-const OUTPUT_FILE = path.join(OUTPUT_DIR, 'vollen_chunks_clean.json');
+const OUTPUT_FILE = path.join(OUTPUT_DIR, 'chunks_clean.json');
 const REPORT_FILE = path.join(OUTPUT_DIR, 'cleaning_report.txt');
 
 // Chunking parameters - REDUCED to capture more content
@@ -34,8 +35,8 @@ const MIN_TOKENS = 100;  // Reduced from 300 to capture shorter but valuable con
 const MAX_TOKENS = 1200; // Increased from 800 for better context per chunk
 const OVERLAP_TOKENS = 50;
 
-// Keywords for navigation/UI noise
-const NAVIGATION_KEYWORDS = [
+// Keywords for navigation/UI noise (use from config if available, otherwise defaults)
+const DEFAULT_NAVIGATION_KEYWORDS = [
   'meny',
   'navigasjon',
   'footer',
@@ -52,8 +53,10 @@ const NAVIGATION_KEYWORDS = [
   'utviklet av',
 ];
 
-// Keywords for consent/legal text
-const CONSENT_KEYWORDS = [
+const NAVIGATION_KEYWORDS = botConfig.navigationKeywords || DEFAULT_NAVIGATION_KEYWORDS;
+
+// Keywords for consent/legal text (use from config if available, otherwise defaults)
+const DEFAULT_CONSENT_KEYWORDS = [
   'cookies',
   'cookie',
   'informasjonskapsler',
@@ -70,6 +73,8 @@ const CONSENT_KEYWORDS = [
   'innsyn',
   'sletting',
 ];
+
+const CONSENT_KEYWORDS = botConfig.consentKeywords || DEFAULT_CONSENT_KEYWORDS;
 
 // Minimum word count for meaningful content - REDUCED to capture more info
 const MIN_WORDS = 15;  // Reduced from 30 to capture shorter informative texts

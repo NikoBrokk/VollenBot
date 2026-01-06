@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
+import { botConfig } from '@/config/bot-config';
 
 // Lazy initialization functions - only create clients when actually needed (not during build)
 function getOpenAIClient(): OpenAI {
@@ -30,7 +31,8 @@ const MATCH_THRESHOLD = 0.25; // Lowered from 0.3 to catch more relevant matches
 
 // Token management configuration
 const MAX_CONTEXT_TOKENS = 3000; // Maximum tokens for context (chunks)
-const MAX_HISTORY_TOKENS = 1000; // Maximum tokens for conversation history
+const MAX_HISTORY_TOKENS = 50000; // Maximum tokens for conversation history (very high to preserve entire chat context)
+// Note: gpt-4o-mini has 128k context window, so we have plenty of room for full conversation history
 const TOKENS_PER_CHAR = 0.25; // Approximate tokens per character for Norwegian text (4 chars = 1 token)
 const MIN_CHUNK_TOKENS = 50; // Minimum tokens needed for a chunk to be useful
 
@@ -42,110 +44,6 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000; // Time window in milliseconds (1 minute
 // In production, consider using Redis or a database for distributed rate limiting
 const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
 
-// Static cache for quick action buttons (pre-generated responses)
-// These are hardcoded responses that are returned immediately without API calls
-interface StaticCacheEntry {
-  answer: string;
-  sources: Source[];
-}
-
-const STATIC_QUICK_ACTION_CACHE: Map<string, StaticCacheEntry> = new Map([
-  ['aktiviteter', {
-    answer: `Vollen tilbyr en rekke spennende aktiviteter for alle aldre! Her er noen av de populære:
-
-- **Håndballtrening** på Vollenhallen for barn i ulike aldersgrupper
-- **Utendørs trening** som bootcamp og lunsjtrening ved Vollen Fergekaia
-- **Båtsamling** i Vollen gjestehavn
-- **Barseltrening med baby** for nye mødre
-- **Gaming og e-sport** for barn (Onsdagsgaming)
-
-Vollen har også museum, galleri, badestrender og mange turmuligheter. Det er alltid noe å gjøre for både liten og stor!`,
-    sources: [{
-      url: 'https://vollenopplevelser.no',
-      title: 'Vollen opplevelser',
-      content: 'Vollen tilbyr en rekke tjenester som fanger essensen av stedets kultur og maritime sjel.'
-    }]
-  }],
-  ['hva skjer', {
-    answer: `På Vollen skjer det alltid noe! Du kan finne:
-
-- **Arrangementer og events** hele året
-- **Båtsamlinger** i gjestehavnen
-- **Trening og aktiviteter** på Vollenhallen og utendørs
-- **Kulturarrangement** som stolpejakt og andre lokale aktiviteter
-
-For å se hva som skjer akkurat nå, kan du sjekke "Aktuelt"-siden på vollenopplevelser.no. Der finner du oppdatert informasjon om kommende arrangementer og hendelser.`,
-    sources: [{
-      url: 'https://vollenopplevelser.no',
-      title: 'Hva skjer - Vollen',
-      content: 'Hva er på gang i Vollen i dag, i morgen eller neste helg? Her finnes det alltid noe å gjøre for både liten og stor.'
-    }]
-  }],
-  ['kontakt', {
-    answer: `Du kan kontakte Vollen Opplevelser på:
-
-**E-post:** opplevelser@askern.no
-
-**Adresse:** Vollenveien 13, 1390 Asker
-
-Har du forslag til arrangementer, tjenester, butikker eller andre tilbud? Vi vil gjerne høre fra deg!`,
-    sources: [{
-      url: 'https://vollenopplevelser.no/kontakt-oss',
-      title: 'Kontakt oss',
-      content: 'Vollenveien 13, 1390 Asker. Kontakt oss: opplevelser@askern.no'
-    }]
-  }],
-  ['om vollen', {
-    answer: `Vollen er et koselig og «passe stort» tettsted ved fjorden, cirka tre mil syd for Oslo.
-
-Her finner du:
-- **Butikker** (søndagsåpne)
-- **Spisesteder** med god mat
-- **Museum og galleri** for kulturinteresserte
-- **Båthavner** for maritime opplevelser
-- **Badestrender** for bading om sommeren
-- **Mange turmuligheter** i vakker natur
-
-Vollen er et levende kystsamfunn med stolte maritime tradisjoner, vakker natur og et mangfoldig næringsliv. Stedet byr på opplevelser hele året – for både fastboende og besøkende!`,
-    sources: [{
-      url: 'https://vollenopplevelser.no',
-      title: 'Om Vollen',
-      content: 'Vollen er et koselig og «passe stort» tettsted ved fjorden, cirka tre mil syd for Oslo. Her finner du butikker (søndagsåpne), spisesteder, museum, galleri, båthavner, badestrender, mange turmuligheter og aktivitetstilbud.'
-    }]
-  }]
-]);
-
-/**
- * Normalize question text for cache key
- */
-function normalizeQuestion(question: string): string {
-  return question.toLowerCase().trim();
-}
-
-/**
- * Check if question is a quick action (has static cache)
- */
-function isQuickAction(question: string): boolean {
-  const normalized = normalizeQuestion(question);
-  const hasCache = STATIC_QUICK_ACTION_CACHE.has(normalized);
-  console.log(`isQuickAction check: "${question}" -> "${normalized}" -> ${hasCache}`);
-  return hasCache;
-}
-
-/**
- * Get static cached quick action response
- */
-function getStaticQuickAction(question: string): StaticCacheEntry | null {
-  const normalized = normalizeQuestion(question);
-  const cached = STATIC_QUICK_ACTION_CACHE.get(normalized);
-  
-  if (cached) {
-    console.log(`Static cache HIT for quick action: ${normalized}`);
-    return cached;
-  }
-  
-  return null;
-}
 
 /**
  * Get client IP address from request
@@ -264,30 +162,89 @@ function truncateToTokens(text: string, maxTokens: number): string {
 
 /**
  * Trim conversation history to fit within token limits
- * Keeps the most recent messages (newest first)
+ * Prioritizes keeping complete conversation pairs (user + assistant)
+ * This ensures that when the bot asks a question, the context is preserved
+ * so the AI can understand follow-up answers like "i dag" or "ja"
  */
 function trimHistory(
   history: Array<{ role: 'user' | 'assistant'; content: string }>
 ): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (history.length === 0) return [];
+  
   let totalTokens = 0;
   const trimmed: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   
   // Process from newest to oldest (reverse order)
+  // Group messages into conversation pairs (user + assistant)
   for (let i = history.length - 1; i >= 0; i--) {
     const msg = history[i];
     const msgTokens = estimateTokens(msg.content);
     
-    if (totalTokens + msgTokens <= MAX_HISTORY_TOKENS) {
-      trimmed.unshift(msg); // Add to beginning to maintain order
-      totalTokens += msgTokens;
+    // Check if this message is part of a conversation pair
+    // If it's an assistant message, check if there's a user message before it
+    // If it's a user message, check if there's an assistant message after it
+    const isPartOfPair = 
+      (msg.role === 'assistant' && i > 0 && history[i - 1].role === 'user') ||
+      (msg.role === 'user' && i < history.length - 1 && history[i + 1].role === 'assistant');
+    
+    // Calculate tokens for the entire pair if applicable
+    let pairTokens = msgTokens;
+    if (isPartOfPair && msg.role === 'assistant' && i > 0) {
+      // Include the user message that precedes this assistant message
+      pairTokens += estimateTokens(history[i - 1].content);
+    }
+    
+    // If we can fit the message (or pair), add it
+    if (totalTokens + pairTokens <= MAX_HISTORY_TOKENS) {
+      if (isPartOfPair && msg.role === 'assistant' && i > 0) {
+        // Add both messages in the pair
+        trimmed.unshift(history[i - 1]); // User message first
+        trimmed.unshift(msg); // Then assistant message
+        totalTokens += pairTokens;
+        i--; // Skip the user message since we've already added it
+      } else {
+        trimmed.unshift(msg);
+        totalTokens += msgTokens;
+      }
     } else {
-      // If we can't fit the full message, try to truncate it
+      // If we can't fit the full message/pair, try to truncate it
       if (totalTokens < MAX_HISTORY_TOKENS * 0.9) {
         // Only truncate if we have space for at least 90% of max
         const remainingTokens = MAX_HISTORY_TOKENS - totalTokens;
         if (remainingTokens >= MIN_CHUNK_TOKENS) {
-          const truncatedContent = truncateToTokens(msg.content, remainingTokens);
-          trimmed.unshift({ ...msg, content: truncatedContent });
+          if (isPartOfPair && msg.role === 'assistant' && i > 0) {
+            // Try to fit both messages, truncating if needed
+            const userMsg = history[i - 1];
+            const userTokens = estimateTokens(userMsg.content);
+            const assistantTokens = estimateTokens(msg.content);
+            
+            if (remainingTokens >= userTokens + assistantTokens) {
+              // Both fit
+              trimmed.unshift(userMsg);
+              trimmed.unshift(msg);
+              totalTokens += userTokens + assistantTokens;
+              i--; // Skip user message
+            } else if (remainingTokens >= userTokens + MIN_CHUNK_TOKENS) {
+              // User fits, truncate assistant
+              const assistantRemaining = remainingTokens - userTokens;
+              const truncatedAssistant = truncateToTokens(msg.content, assistantRemaining);
+              trimmed.unshift(userMsg);
+              trimmed.unshift({ ...msg, content: truncatedAssistant });
+              totalTokens = MAX_HISTORY_TOKENS; // Mark as full
+              i--; // Skip user message
+            } else {
+              // Only user fits
+              const truncatedUser = truncateToTokens(userMsg.content, remainingTokens);
+              trimmed.unshift({ ...userMsg, content: truncatedUser });
+              totalTokens = MAX_HISTORY_TOKENS;
+              i--; // Skip user message
+            }
+          } else {
+            // Single message, truncate it
+            const truncatedContent = truncateToTokens(msg.content, remainingTokens);
+            trimmed.unshift({ ...msg, content: truncatedContent });
+            totalTokens = MAX_HISTORY_TOKENS;
+          }
         }
       }
       break;
@@ -298,137 +255,66 @@ function trimHistory(
 }
 
 /**
- * Expand short, general queries to include related terms for better embedding matching
- * This helps with queries like "Spisesteder" -> "restauranter kafeer spisesteder matsteder"
+ * Build contextual query for embedding search by using conversation history
+ * This helps with follow-up questions like "tur" by including relevant context
+ * from previous messages, while letting the LLM handle language understanding naturally
+ * 
+ * IMPORTANT: This is especially critical when the user answers the bot's questions
+ * (e.g., bot asks "Når tenker du – i dag eller i helgen?" and user answers "i dag")
  */
-function expandQuery(query: string): string {
-  const lowerQuery = query.toLowerCase().trim();
+function buildContextualQuery(
+  query: string,
+  history: Array<{ role: 'user' | 'assistant'; content: string }>
+): string {
+  // If query is very short (1-3 words) and we have history, include recent context
+  const wordCount = query.trim().split(/\s+/).filter(w => w.length > 0).length;
+  const isShortFollowUp = wordCount <= 3 && history.length > 0;
   
-  // Query expansion map for common general terms
-  const expansions: Record<string, string> = {
-    'spisesteder': 'restauranter kafeer spisesteder matsteder spise og drikke',
-    'spise': 'restauranter kafeer spisesteder matsteder spise og drikke',
-    'restaurant': 'restauranter kafeer spisesteder matsteder spise og drikke',
-    'kafe': 'kafeer restauranter spisesteder matsteder spise og drikke',
-    'mat': 'restauranter kafeer spisesteder matsteder spise og drikke',
-    'drikke': 'restauranter kafeer spisesteder matsteder spise og drikke',
-    'aktiviteter': 'aktiviteter trening arrangementer opplevelser events',
-    'aktivitet': 'aktiviteter trening arrangementer opplevelser events',
-    'overnatting': 'overnatting hotell b&b gjestehus overnattingssteder',
-    'overnatte': 'overnatting hotell b&b gjestehus overnattingssteder',
-    'parkering': 'parkering parkere parkeringsplass parkeringsplasser',
-    'parkere': 'parkering parkere parkeringsplass parkeringsplasser',
-    'butikker': 'butikker butikk shop shopping dagligvarer',
-    'butikk': 'butikker butikk shop shopping dagligvarer',
-    'transport': 'transport buss bil ferge hvordan komme til vollen',
-    'komme til': 'transport buss bil ferge hvordan komme til vollen',
-    'historie': 'historie historisk kultur museum tradisjon fortid',
-    'lokasjon': 'lokasjon ligger adresse plassering hvor er vollen',
-    'hvor ligger': 'lokasjon ligger adresse plassering hvor er vollen',
-  };
-  
-  // Check for exact match
-  if (expansions[lowerQuery]) {
-    return `${query} ${expansions[lowerQuery]}`;
+  if (!isShortFollowUp) {
+    // For longer queries, trust the LLM - just use the query as-is
+    return query;
   }
   
-  // Check if query contains any expansion terms
-  for (const [key, expansion] of Object.entries(expansions)) {
-    if (lowerQuery.includes(key)) {
-      return `${query} ${expansion}`;
+  // For short follow-ups, include relevant context from the ENTIRE conversation
+  // This helps embedding search understand what "i dag" or "tur" refers to in context
+  // We use the whole history to catch all relevant context, including bot's questions
+  const recentContext: string[] = [];
+  
+  // Look back through ALL messages in the conversation history
+  // This ensures we capture all context, especially when user answers bot's questions
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    
+    // Always include assistant messages (they often contain the bot's questions)
+    // Skip very long messages (they might be too general) - but allow longer for full context
+    if (msg.role === 'assistant' && msg.content.length < 1000) {
+      recentContext.unshift(msg.content);
+    }
+    
+    // Include user messages for context
+    if (msg.role === 'user' && msg.content.length < 500) {
+      recentContext.unshift(msg.content);
     }
   }
   
-  // No expansion needed
+  // Combine: use the original query, but add context if available
+  if (recentContext.length > 0) {
+    // Use a simple format that preserves the query but adds context
+    // This helps embedding search while still prioritizing the actual query
+    // Include full context from entire conversation (no length limit for embedding query)
+    const contextText = recentContext.join(' ');
+    return `${query} ${contextText}`;
+  }
+  
   return query;
 }
 
 /**
- * Extract key terms from a query for content matching
+ * Find the most relevant source based on AI-powered similarity scores from embeddings
+ * Uses cosine similarity scores from Supabase (AI-based) instead of manual text matching
  */
-function extractKeyTerms(query: string): string[] {
-  // Remove common stop words in Norwegian
-  const stopWords = new Set([
-    'hva', 'hvor', 'hvem', 'hvorfor', 'hvordan', 'når', 'hvilken', 'hvilke',
-    'er', 'var', 'ble', 'blir', 'har', 'hadde', 'vil', 'skal', 'kan', 'må',
-    'og', 'eller', 'men', 'for', 'på', 'av', 'til', 'med', 'om', 'i', 'å',
-    'en', 'et', 'den', 'det', 'de', 'som', 'seg', 'sin', 'sitt', 'sine',
-    'jeg', 'du', 'han', 'hun', 'vi', 'dere', 'de', 'meg', 'deg', 'ham', 'henne',
-    'oss', 'dere', 'dem', 'min', 'din', 'hans', 'hennes', 'vår', 'deres',
-    'vollen', 'opplevelser', 'opplevelser.no', 'vollenopplevelser.no'
-  ]);
-  
-  // Extract words (Norwegian characters included)
-  const words = query.toLowerCase()
-    .replace(/[^\wæøåÆØÅ\s]/g, ' ')
-    .split(/\s+/)
-    .filter(word => word.length > 2 && !stopWords.has(word));
-  
-  return [...new Set(words)]; // Remove duplicates
-}
 
-/**
- * Calculate content relevance score between query and a source
- * Returns a score from 0-1 indicating how well the source matches the query
- */
-function calculateContentRelevance(
-  query: string,
-  sourceUrl: string,
-  sourceTitle: string | null,
-  sourceContent: string
-): number {
-  const keyTerms = extractKeyTerms(query);
-  if (keyTerms.length === 0) return 0.5; // Neutral score if no key terms
-  
-  const urlLower = sourceUrl.toLowerCase();
-  const titleLower = (sourceTitle || '').toLowerCase();
-  const contentLower = sourceContent.toLowerCase();
-  
-  let relevanceScore = 0;
-  let matches = 0;
-  
-  // Check URL match (high weight)
-  for (const term of keyTerms) {
-    if (urlLower.includes(term)) {
-      relevanceScore += 0.3;
-      matches++;
-    }
-  }
-  
-  // Check title match (high weight)
-  for (const term of keyTerms) {
-    if (titleLower.includes(term)) {
-      relevanceScore += 0.3;
-      matches++;
-    }
-  }
-  
-  // Check content match (medium weight, but count occurrences)
-  let contentMatches = 0;
-  for (const term of keyTerms) {
-    const regex = new RegExp(term, 'gi');
-    const occurrences = (contentLower.match(regex) || []).length;
-    if (occurrences > 0) {
-      contentMatches += Math.min(occurrences, 3); // Cap at 3 per term
-      matches++;
-    }
-  }
-  relevanceScore += (contentMatches / keyTerms.length) * 0.2;
-  
-  // Normalize by number of key terms
-  if (matches > 0) {
-    return Math.min(1.0, relevanceScore);
-  }
-  
-  return 0;
-}
-
-/**
- * Find the most relevant source based on actual content matching
- * This prioritizes sources that actually contain information related to the query
- */
 function findMostRelevantSource(
-  query: string,
   selectedMatches: any[],
   homepageUrls: string[]
 ): Source | null {
@@ -438,32 +324,26 @@ function findMostRelevantSource(
     url: string;
     title: string | null;
     content: string;
-    relevanceScore: number;
-    similarityScore: number;
+    similarityScore: number; // AI-based cosine similarity from embeddings
     chunkCount: number;
   }
   
-  // Group by URL and calculate aggregated metrics
+  // Group by URL and use AI-based similarity scores (cosine similarity from embeddings)
   const sourceMap = new Map<string, SourceCandidate>();
   
   for (const match of selectedMatches) {
     const url = match.source_url || '';
     if (!url) continue;
     
-    const relevance = calculateContentRelevance(
-      query,
-      url,
-      match.title || null,
-      match.content || ''
-    );
+    // Use similarity score directly (already AI-based from embedding cosine similarity)
+    const similarity = match.similarity || 0;
     
     if (!sourceMap.has(url)) {
       sourceMap.set(url, {
         url: url,
         title: match.title || null,
         content: match.content || '',
-        relevanceScore: relevance,
-        similarityScore: match.similarity || 0,
+        similarityScore: similarity,
         chunkCount: 1,
       });
     } else {
@@ -473,9 +353,8 @@ function findMostRelevantSource(
         existing.content = match.content || '';
         existing.title = match.title || null;
       }
-      // Average relevance (or use max?)
-      existing.relevanceScore = Math.max(existing.relevanceScore, relevance);
-      existing.similarityScore = Math.max(existing.similarityScore, match.similarity || 0);
+      // Use max similarity score (best match from AI)
+      existing.similarityScore = Math.max(existing.similarityScore, similarity);
       existing.chunkCount += 1;
     }
   }
@@ -492,25 +371,21 @@ function findMostRelevantSource(
     }
   }
   
-  // Sort by relevance score (content match), then similarity, then chunk count
-  const sortByRelevance = (a: SourceCandidate, b: SourceCandidate) => {
-    // Primary: content relevance (how well it matches the query)
-    if (Math.abs(b.relevanceScore - a.relevanceScore) > 0.1) {
-      return b.relevanceScore - a.relevanceScore;
-    }
-    // Secondary: similarity score
+  // Sort by AI-based similarity score (cosine similarity), then chunk count
+  const sortBySimilarity = (a: SourceCandidate, b: SourceCandidate) => {
+    // Primary: similarity score from AI embeddings (cosine similarity)
     if (Math.abs(b.similarityScore - a.similarityScore) > 0.05) {
       return b.similarityScore - a.similarityScore;
     }
-    // Tertiary: chunk count (more chunks = more content used)
+    // Secondary: chunk count (more chunks = more content used)
     return b.chunkCount - a.chunkCount;
   };
   
   // Prioritize specific pages over homepage
   if (specificSources.length > 0) {
-    specificSources.sort(sortByRelevance);
+    specificSources.sort(sortBySimilarity);
     const best = specificSources[0];
-    console.log(`Selected specific source: ${best.url} (relevance: ${best.relevanceScore.toFixed(3)}, similarity: ${best.similarityScore.toFixed(3)}, chunks: ${best.chunkCount})`);
+    console.log(`Selected specific source: ${best.url} (similarity: ${best.similarityScore.toFixed(3)}, chunks: ${best.chunkCount})`);
     return {
       url: best.url,
       title: best.title,
@@ -520,9 +395,9 @@ function findMostRelevantSource(
   
   // Fallback to homepage if no specific pages
   if (homepageSources.length > 0) {
-    homepageSources.sort(sortByRelevance);
+    homepageSources.sort(sortBySimilarity);
     const best = homepageSources[0];
-    console.log(`Selected homepage source: ${best.url} (relevance: ${best.relevanceScore.toFixed(3)}, similarity: ${best.similarityScore.toFixed(3)}, chunks: ${best.chunkCount})`);
+    console.log(`Selected homepage source: ${best.url} (similarity: ${best.similarityScore.toFixed(3)}, chunks: ${best.chunkCount})`);
     return {
       url: best.url,
       title: best.title,
@@ -646,85 +521,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if this is a quick action with static cache
-    // Only use static cache if there's no conversation history (fresh question)
-    const normalizedMessage = normalizeQuestion(message);
-    console.log(`Checking quick action for: "${message}" (normalized: "${normalizedMessage}")`);
-    console.log(`History length: ${history.length}`);
-    console.log(`Is quick action: ${isQuickAction(message)}`);
-    
-    if (isQuickAction(message) && history.length === 0) {
-      const cached = getStaticQuickAction(message);
-      console.log(`Cached response found: ${cached ? 'YES' : 'NO'}`);
-      if (cached) {
-        console.log('Returning STATIC cached response - skipping all API calls');
-        // Return cached response as streaming (to match expected format)
-        // Stream quickly since it's pre-generated
-        const encoder = new TextEncoder();
-        const stream = new ReadableStream({
-          async start(controller) {
-            try {
-              // Stream the cached answer in larger chunks for fast display
-              const answer = cached.answer;
-              const chunkSize = 50; // Larger chunks for faster display
-              
-              for (let i = 0; i < answer.length; i += chunkSize) {
-                const chunk = answer.slice(i, i + chunkSize);
-                const data = JSON.stringify({ type: 'token', data: chunk });
-                controller.enqueue(encoder.encode(`data: ${data}\n\n`));
-                // Minimal delay for smooth display
-                await new Promise(resolve => setTimeout(resolve, 5));
-              }
-              
-              // Send sources (DISABLED - source selection not accurate enough yet)
-              // const sourcesData = JSON.stringify({ type: 'sources', data: cached.sources });
-              // controller.enqueue(encoder.encode(`data: ${sourcesData}\n\n`));
-              
-              // Send done signal
-              controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
-              controller.close();
-            } catch (error) {
-              console.error('Error streaming cached response:', error);
-              controller.error(error);
-            }
-          },
-        });
-
-        return new NextResponse(stream, {
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Cache': 'HIT',
-            'X-RateLimit-Limit': RATE_LIMIT_REQUESTS.toString(),
-            'X-RateLimit-Remaining': rateLimit.remaining.toString(),
-            'X-RateLimit-Reset': new Date(rateLimit.resetAt).toISOString(),
-            'X-Performance-Embedding': '0',
-            'X-Performance-Supabase': '0',
-            'X-Performance-Chat': '0',
-            'X-Performance-TTFB': '0',
-          },
-        });
-      }
-    }
-
     // Performance timing
     const perfStart = Date.now();
     let embeddingTime = 0;
     let supabaseTime = 0;
     let chatTime = 0;
 
-    // 1. Expand query for better matching (especially for short, general queries)
-    const expandedQuery = expandQuery(message);
+    // 1. Build contextual query using conversation history (for follow-up questions)
+    // This helps embedding search understand context without overriding LLM's language understanding
+    const contextualQuery = buildContextualQuery(message, history);
     console.log(`Original query: "${message}"`);
-    console.log(`Expanded query: "${expandedQuery}"`);
+    if (contextualQuery !== message) {
+      console.log(`Contextual query (with history): "${contextualQuery}"`);
+    }
     
-    // 2. Create embedding for the expanded query
+    // 2. Create embedding for the contextual query
     console.log('Creating embedding for message...');
     const embeddingStart = Date.now();
     const embeddingResponse = await openai.embeddings.create({
       model: EMBEDDING_MODEL,
-      input: expandedQuery,
+      input: contextualQuery,
     });
     embeddingTime = Date.now() - embeddingStart;
     console.log(`Embedding time: ${embeddingTime}ms`);
@@ -778,64 +594,7 @@ export async function POST(request: NextRequest) {
     );
 
     // 4. Build context string from chunks with token management
-    const systemPrompt = `DU ER: Vollen Bot – en hjelpsom, lokalkjent guide for Vollen. Du svarer på norsk, vennlig og lokalt, men kompakt.
-
-KONTEKST:
-Du får utdrag fra Vollen Opplevelser og arrangementer fra «Hva skjer i Asker». Bruk kun denne konteksten som fakta.
-
-HOVEDJOBB:
-Hjelp brukeren å finne spesifikke:
-
-* Arrangementer og hva som skjer
-* Spisesteder og butikker
-* Turtips og opplevelser
-* Båt, transport og praktisk info
-  Gi konkrete forslag fra konteksten med navn, sted og tidspunkt.
-  ALLTID bruk spesifikke navn, alltid vær så presis som mulig. 
-
-SVARSTIL:
-* Maks 3–6 linjer før evt punktliste.
-* Bruk punktliste når du nevner flere ting. 
-* Bruk alltid spesifikke navn på bedrifter
-* Bruk fet skrift for navn/steder/tider når det hjelper.
-* Skriv som en lokalkjent person, men ikke overdriv.
-* Vær jovial og vennlig, spesielt i starten av svaret, men med utgangspunkt i spørsmålet
-
-REGLER FOR FAKTA OG USIKKERHET:
-
-* Ikke finn på detaljer (dato, tid, pris, adresse, åpningstider, regler).
-* Hvis konteksten har svar: gi det presist og konkret.
-* Hvis konteksten er delvis relevant: gi det du faktisk vet + si hva som mangler (kort).
-* Hvis du ikke har info om akkurat det brukeren spør om:
-
-  1. Gi et nært alternativ fra konteksten (hvis relevant)
-  2. Still 1 kort oppfølgingsspørsmål for å spisse (maks ett)
-* Hvis du har null relevant info: si kort “Jeg finner ikke info om det i databasen min” og spør hva de mener (1 spørsmål).
-
-OPPFØLGINGSSPØRSMÅL:
-Still bare oppfølgingsspørsmål når det øker treffsikkerhet, f.eks:
-
-* “Når tenker du – i dag eller i helgen?”
-* “Vil du ha noe familievennlig eller mer kveldsstemning?”
-* “Tenker du mat, tur eller arrangement?”
-
-HÅNDTER GENERELLE SPØRSMÅL SLIK:
-Hvis brukeren spør “Hva skjer i Vollen?” eller “Hva kan man gjøre?”:
-
-* Gi 3–5 konkrete eksempler fra konteksten (arrangementer/steder)
-* Prioriter det som er mest tidsnært eller tydelig beskrevet
-* Avslutt med ett kort valgspørsmål (type opplevelse eller tidspunkt)
-
-FORMATMAL (bruk når relevant):
-**Kort oppsummering**
-
-* punkt
-* punkt
-* punkt
-* punkt
-* punkt
-  <ett kort spørsmål>
-`;
+    const systemPrompt = botConfig.botSystemPrompt;
 
     const { context, selectedMatches, totalTokens } = buildContextWithTokenManagement(
       matches,
@@ -857,11 +616,11 @@ FORMATMAL (bruk når relevant):
     }
 
     // 5. Prepare sources for response
-    // Strategy: Find the source that best matches the actual content of the query
-    // This analyzes which source actually contains information related to what was asked
-    const homepageUrls = ['https://vollenopplevelser.no', 'https://vollenopplevelser.no/'];
+    // Strategy: Use AI-based similarity scores (cosine similarity from embeddings) to select best source
+    // No manual text matching - all understanding is AI-powered
+    const homepageUrls = botConfig.homepageUrls;
     
-    const bestSource = findMostRelevantSource(message, selectedMatches, homepageUrls);
+    const bestSource = findMostRelevantSource(selectedMatches, homepageUrls);
     
     const sources: Source[] = [];
     if (bestSource) {

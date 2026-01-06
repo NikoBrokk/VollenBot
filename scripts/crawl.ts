@@ -2,6 +2,7 @@ import FirecrawlApp from '@mendable/firecrawl-js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
+import { botConfig } from '../config/bot-config';
 
 // Load environment variables
 dotenv.config();
@@ -18,9 +19,9 @@ interface PageData {
 }
 
 const API_KEY = process.env.FIRECRAWL_API_KEY;
-const START_URL = 'https://vollenopplevelser.no';
+const START_URL = botConfig.startUrl;
 const OUTPUT_DIR = path.join(process.cwd(), 'data', 'raw');
-const OUTPUT_FILE = path.join(OUTPUT_DIR, 'firecrawl_vollen.json');
+const OUTPUT_FILE = path.join(OUTPUT_DIR, 'firecrawl_data.json');
 const DISCOVERED_URLS_FILE = path.join(OUTPUT_DIR, 'discovered_urls.json');
 
 if (!API_KEY) {
@@ -102,7 +103,7 @@ function isBoilerplateText(text: string): boolean {
     /lagring\s+av\s+data\s+eller\s+tilgang/i,
     /dette\s+var\s+litt\s+kjipt/i, // 404 page text
     /hjemmeside$/i, // Just "Hjemmeside" as text
-    /^vollen\s+er\s+et\s+koselig\s+og.*opplevelser@askern\.no.*askern\.no$/i, // Repeated footer text
+    // Note: Add site-specific footer patterns here if needed via botConfig.boilerplatePatterns
   ];
 
   const textLower = text.toLowerCase().trim();
@@ -125,10 +126,9 @@ function isBoilerplateText(text: string): boolean {
     return true;
   }
 
-  // Check if it's just repetitive "Vollen er et koselig..." footer text
-  if (/^vollen\s+er\s+et\s+koselig.*kontakt\s+oss.*opplevelser@askern\.no/i.test(text) && text.length < 300) {
-    return true;
-  }
+  // Check for repetitive footer text (customize based on your site)
+  // This is a generic check - customize the pattern for your site's footer if needed
+  // You can also add patterns via botConfig.boilerplatePatterns
 
   return false;
 }
@@ -577,22 +577,38 @@ async function crawl(): Promise<void> {
     const RETRY_DELAY_BASE = 5000; // 5 seconds initial retry delay
     
     /**
-     * Check if URL is the main "opplev-vollen" page that needs "last inn mer" clicks
+     * Check if URL matches any special page pattern that needs "last inn mer" clicks
      */
     function needsLoadMoreClicks(url: string): boolean {
+      if (!botConfig.specialPages || botConfig.specialPages.length === 0) {
+        return false;
+      }
+      
       const normalized = url.toLowerCase().replace(/\/$/, '');
-      return normalized.includes('/opplev-vollen') && 
-             !normalized.includes('/opplev-vollen/') && // Only the main page, not sub-pages
-             (normalized.endsWith('/opplev-vollen') || normalized.endsWith('opplev-vollen'));
+      
+      for (const specialPage of botConfig.specialPages) {
+        if (specialPage.needsLoadMore) {
+          try {
+            const pattern = new RegExp(specialPage.urlPattern);
+            if (pattern.test(normalized)) {
+              return true;
+            }
+          } catch (error) {
+            console.warn(`Invalid regex pattern in specialPages: ${specialPage.urlPattern}`);
+          }
+        }
+      }
+      
+      return false;
     }
 
     /**
-     * Scrape /opplev-vollen page with special handling to click "last inn mer" multiple times
+     * Scrape special page with handling to click "last inn mer" multiple times
      * Uses Puppeteer to interact with the page and click the button
      */
-    async function scrapeOpplevVollenPage(url: string): Promise<any | null> {
+    async function scrapeSpecialPage(url: string): Promise<any | null> {
       try {
-        console.log('  🔄 Using Puppeteer for /opplev-vollen page to click "last inn mer"...');
+        console.log(`  🔄 Using Puppeteer for special page to click "last inn mer"...`);
         
         // Dynamic import of puppeteer (only load if needed)
         const puppeteer = await import('puppeteer').catch(() => null);
@@ -801,13 +817,13 @@ async function crawl(): Promise<void> {
 
     /**
      * Scrape a single URL with retry logic and exponential backoff
-     * Special handling for /opplev-vollen page to click "last inn mer" button
+     * Special handling for special pages that need "last inn mer" button clicks
      */
     async function scrapeUrlWithRetry(url: string, retryCount = 0): Promise<any | null> {
       try {
-        // Special handling for /opplev-vollen page
+        // Special handling for pages that need load more clicks
         if (needsLoadMoreClicks(url)) {
-          return await scrapeOpplevVollenPage(url);
+          return await scrapeSpecialPage(url);
         }
 
         // Regular scraping for other pages

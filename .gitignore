@@ -4,6 +4,9 @@ dist/
 data/
 *.log
 
+# TypeScript
+*.tsbuildinfo
+
 # Next.js
 .next/
 out/

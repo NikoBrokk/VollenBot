@@ -25,7 +25,7 @@ interface DatabaseChunk {
   created_at?: string;
 }
 
-const INPUT_FILE = path.join(process.cwd(), 'data', 'chunks', 'vollen_chunks_clean.json');
+const INPUT_FILE = path.join(process.cwd(), 'data', 'chunks', 'chunks_clean.json');
 
 // Environment variables
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
