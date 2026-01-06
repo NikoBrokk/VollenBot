@@ -17,7 +17,7 @@ interface Source {
 }
 
 const INITIAL_CHIPS = [
-  'Arrangementer',
+  'Aktiviteter',
   'Spisesteder',
   'Kultur',
   'Båt & Sjø'
